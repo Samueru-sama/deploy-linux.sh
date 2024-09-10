@@ -151,11 +151,7 @@ patchelf --set-rpath '$ORIGIN/../lib' $_EXECUTABLE
 _APPDIR=$2
 cd ${_APPDIR}
 
-cp -nvs $(find -type f -regex '.*/icons/.*\.svg' || head -n 1) ./
-cp -nvs $(find -type f -regex '.*/applications/.*\.desktop' || head -n 1) ./
-
 if [ "${_NOT_FOUND}" != "" ]; then
   >&2 echo "WARNING: failed to find the following libraries:"
   >&2 echo "$(echo -n $_NOT_FOUND | tr ':' '\n' | sort -u)"
 fi
-
