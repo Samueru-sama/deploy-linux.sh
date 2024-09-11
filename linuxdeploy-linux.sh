@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # [DEPLOY_QT=1] deploy-linux.sh <executable>
 #   (Simplified) bash re-implementation of [linuxdeploy](https://github.com/linuxdeploy).
 #   Reads [executable] and copies required libraries to [AppDir]/usr/lib
@@ -22,6 +22,8 @@ TARGET="$(command -v "$1" 2>/dev/null)"
 APPDIR="$2"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 EXCLUDES="$(wget -q "$FORBIDDEN" -O - | sed 's/#.*//; /^$/d')"
+LIB_DIR="$(readlink -m $(dirname $TARGET)/../lib)"
+PLUGIN_DIR="$LIB_DIR/../plugins"
 if [ -z "$1" ]; then
     echo "USAGE: $0 /path/to/binary"
     echo "USAGE: $0 /path/to/binary /path/to/AppDir"
@@ -56,28 +58,30 @@ TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
 LIB_PATHS="$(echo "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
 QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
     -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
+
 export EXCLUDES
 export LIB_DIRS
 export PREFIX
 export QT_PLUGIN_PATH
 export LIB_PATHS
 
+# declare functions
 _get_deps() {
     local DESTDIR=$2
     local needed_libs=$(patchelf --print-needed $1 | tr '\n' ' ')
     for i in $needed_libs; do
         # check it isn't in the exclude list or it is already deployed
         if echo "$EXCLUDES" | grep -q $i; then
-            >&2 echo "$i is on the exclude list... skipping"
+            echo "$i is on the exclude list... skipping"
             continue
         elif [ -f $DESTDIR/$i ]; then
-            >&2 echo "$i is already deployed... skipping"
+            echo "$i is already deployed... skipping"
             continue
         fi
         _LIB=""
         # this is cursed omg
         for lib in $LIB_PATHS; do
-            _PATH=$(find $lib -regex ".*$(echo -n $i | tr '+' '.')" -print -quit)
+            _PATH=$(find $lib -regex ".*$(printf $i | tr '+' '.')" -print -quit)
             if [ -n "$_PATH" ]; then
                 _LIB=$(readlink -e $_PATH | tr '\n' ' ') 
                 if [ -z $_LIB ]; then
@@ -89,47 +93,48 @@ _get_deps() {
             fi
         done
         # copy libs to appdir
-        >&2 cp -v $_LIB $DESTDIR/$i &
+        cp -v $_LIB $DESTDIR/$i &
         _get_deps $_LIB $DESTDIR
     done
 }
 
-export -f _get_deps # TODO GET RID OF BASHISM
-
-LIB_DIR="$(readlink -m $(dirname $TARGET)/../lib)"
-PLUGIN_DIR="$LIB_DIR/../plugins"
-mkdir -p $LIB_DIR $PLUGIN_DIR
-_get_deps $TARGET $LIB_DIR
-
-if [ "$DEPLOY_QT" = "1" ]; then
-  mkdir -p $PLUGIN_DIR/platforms
-  cp -nv "${QT_PLUGIN_PATH}/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
-	# Find any remaining libraries needed for Qt libraries
-  _get_deps $PLUGIN_DIR/platforms/libqxcb.so $LIB_DIR
-
-  for i in $QT_PLUGINS; do
-    mkdir -p $PLUGIN_DIR/${i}
-    cp -rnv ${QT_PLUGIN_PATH}/${i}/*.so $PLUGIN_DIR/${i}
-    find $PLUGIN_DIR/ \
-    -type f -regex '.*\.so' \
-    -exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'
+_deploy_qt() {
+    mkdir -p $PLUGIN_DIR/platforms
+    cp -nv "${QT_PLUGIN_PATH}/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
     # Find any remaining libraries needed for Qt libraries
-    find $PLUGIN_DIR/${i} -type f -exec bash -c "_get_deps {} $LIB_DIR" ';'
-  done
-  
-  QT_CONF=${LIB_DIR}/../bin/qt.conf
-  echo "[Paths]" > $QT_CONF
-  echo "Prefix = ../" >> $QT_CONF
-  echo "Plugins = plugins" >> $QT_CONF
-  echo "Imports = qml" >> $QT_CONF
-  echo "Qml2Imports = qml" >> $QT_CONF
-fi
+    _get_deps $PLUGIN_DIR/platforms/libqxcb.so $LIB_DIR
+    for plugin in $QT_PLUGINS; do
+        mkdir -p $PLUGIN_DIR/$plugin
+        cp -rnv $QT_PLUGIN_PATH/$plugin/*.so $PLUGIN_DIR/$plugin
+        find $PLUGIN_DIR/ \
+        -type f -regex '.*\.so' \
+        -exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'
+        # Find any remaining libraries needed for Qt libraries
+        for file in "$PLUGIN_DIR/$plugin"/*; do
+            [ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
+        done
+    done
+    # make qt.conf file   
+    QT_CONF=${LIB_DIR}/../bin/qt.conf
+    echo "[Paths]" > $QT_CONF
+    echo "Prefix = ../" >> $QT_CONF
+    echo "Plugins = plugins" >> $QT_CONF
+    echo "Imports = qml" >> $QT_CONF
+    echo "Qml2Imports = qml" >> $QT_CONF
+}
 
 # Fix rpath of libraries and executable so they can find the packaged libraries
-find ${LIB_DIR} -type f -exec patchelf --set-rpath '$ORIGIN' {} ';'
-patchelf --set-rpath '$ORIGIN/../lib' $TARGET
+_patch_libs_path() {
+  find ${LIB_DIR} -type f -exec patchelf --set-rpath '$ORIGIN' {} ';'
+  patchelf --set-rpath '$ORIGIN/../lib' "$TARGET"
+}
 
+# logic
+mkdir -p $LIB_DIR $PLUGIN_DIR || exit 1
+_get_deps $TARGET $LIB_DIR
+[ "$DEPLOY_QT" = "1" ] && _deploy_qt
+_patch_libs_path
 if [ -n "$NOT_FOUND" ]; then
   echo "WARNING: failed to find the following libraries:"
-  printf $NOT_FOUND | tr ':' '\n' | sort -u
+  echo $NOT_FOUND | tr ':' '\n' | sort -u
 fi
