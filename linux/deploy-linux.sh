@@ -36,7 +36,7 @@ elif ! command -v wget 1>/dev/null; then
     echo "ERROR: Missing wget dependency!"
     exit 1
 elif [ -z "$EXCLUDES" ]; then
-    echo "ERROR: Can't download the exclude list, no internet?"
+    echo "ERROR: Could not download the exclude list, no internet?"
     exit 1
 fi
 [ -z "$PREFIX" ] && PREFIX="/usr"
@@ -45,22 +45,22 @@ fi
 [ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
                                 platforminputcontexts platformthemes \
                                 xcbglintegrations iconengines"
-export EXCLUDES
-export LIB_DIRS
-export PREFIX
-export QT_PLUGIN_PATH
-
 # Look for a lib dir next to each instance of PATH
-export LIB_PATHS=
 for libpath in $LIB_DIRS; do
-    for path in $(printf $PATH | tr ":" " "); do
+    for path in $(printf $PATH | tr ':' ' '); do
         TRY_PATH="$(readlink -e "$path/../$libpath" 2>/dev/null)"
         [ -n "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
     done
 done
-# Include rpath of binary and only show unique
-LIB_PATHS="$LIB_PATHS $(patchelf --print-rpath $TARGET | tr ':' ' ')"
-LIB_PATHS=$(printf "$LIB_PATHS" | sed 's/ /\n/g' | sort -u)
+TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
+LIB_PATHS="$(echo "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
+QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
+    -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
+export EXCLUDES
+export LIB_DIRS
+export PREFIX
+export QT_PLUGIN_PATH
+export LIB_PATHS
 
 _get_deps() {
     local DESTDIR=$2
@@ -82,7 +82,7 @@ _get_deps() {
                 _LIB=$(readlink -e $_PATH | tr '\n' ' ') 
                 if [ -z $_LIB ]; then
                     >&2 printf '\n%s\n\n' "ERROR: could not find \"$i\""
-                    echo -n "$i:"
+                    NOT_FOUND="$NOT_FOUND:$i"
                     continue
                 fi
                 break
@@ -97,34 +97,24 @@ _get_deps() {
 export -f _get_deps # TODO GET RID OF BASHISM
 
 LIB_DIR="$(readlink -m $(dirname $TARGET)/../lib)"
-mkdir -p $LIB_DIR
-NOT_FOUND=$(_get_deps $TARGET $LIB_DIR)
+PLUGIN_DIR="$LIB_DIR/../plugins"
+mkdir -p $LIB_DIR $PLUGIN_DIR
+_get_deps $TARGET $LIB_DIR
 
-if [ "${DEPLOY_QT}" = "1" ]; then
-  # Find Qt path from search paths
-  for i in $LIB_PATHS; do
-    _QT_CORE_LIB=$(find ${i} -type f -regex '.*/libQt5Core\.so.*' | head -1)
-    if [ -n "${_QT_CORE_LIB}" ]; then
-      _QT_PATH=$(dirname ${_QT_CORE_LIB})/../
-      break
-    fi
-  done
-  
-  QT_PLUGIN_PATH=$(readlink -e $(find ${_QT_PATH} -type d -regex '.*/plugins/platforms' | head -1)/../)
-
-  mkdir -p ${LIB_DIR}/../plugins/platforms
-  cp -nv "${QT_PLUGIN_PATH}/platforms/libqxcb.so" ${LIB_DIR}/../plugins/platforms/
+if [ "$DEPLOY_QT" = "1" ]; then
+  mkdir -p $PLUGIN_DIR/platforms
+  cp -nv "${QT_PLUGIN_PATH}/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
 	# Find any remaining libraries needed for Qt libraries
-  NOT_FOUND+=$(_get_deps ${LIB_DIR}/../plugins/platforms/libqxcb.so $LIB_DIR)
+  _get_deps $PLUGIN_DIR/platforms/libqxcb.so $LIB_DIR
 
   for i in $QT_PLUGINS; do
-    mkdir -p ${LIB_DIR}/../plugins/${i}
-    cp -rnv ${QT_PLUGIN_PATH}/${i}/*.so ${LIB_DIR}/../plugins/${i}
-    find ${LIB_DIR}/../plugins/ \
+    mkdir -p $PLUGIN_DIR/${i}
+    cp -rnv ${QT_PLUGIN_PATH}/${i}/*.so $PLUGIN_DIR/${i}
+    find $PLUGIN_DIR/ \
     -type f -regex '.*\.so' \
     -exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'
     # Find any remaining libraries needed for Qt libraries
-    NOT_FOUND+=$(find ${LIB_DIR}/../plugins/${i} -type f -exec bash -c "_get_deps {} $LIB_DIR" ';')
+    find $PLUGIN_DIR/${i} -type f -exec bash -c "_get_deps {} $LIB_DIR" ';'
   done
   
   QT_CONF=${LIB_DIR}/../bin/qt.conf
