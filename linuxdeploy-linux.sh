@@ -1,6 +1,21 @@
 #!/bin/sh
 # fork of https://github.com/lat9nq/deploy/tree/main
 # made POSIX and extended with more functionality and improvements
+#
+# "USAGE: $0 /path/to/binary"
+# "USAGE: $0 /path/to/binary /path/to/AppDir"
+# "USAGE: DEPLOY_QT=1 $0 /path/to/binary /path/to/AppDir"
+# "USAGE: SKIP=\"libA.so libB.so\" $0 /path/to/binary /path/to/AppDir"
+#
+#  user defined variables:
+# "$LIB_DIRS" names of the library directories on the HOST system to search 
+#  default: lib64 and lib
+# "$SKIP" names of the libraries you wish to skip, space separated
+# "$DEPLOY_QT" when set to 1 it enables the deploying of Qt plugins
+# "$QT_PLUGINS" names of the Qt plugins to deploy
+# defaults: audio bearer imageformats mediaservice platforminputcontexts 
+#           platformthemes xcbglintegrations iconengines
+#
 #~ set -x
 
 # set vars
