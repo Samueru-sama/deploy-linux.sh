@@ -1,35 +1,21 @@
 #!/bin/sh
-# [DEPLOY_QT=1] deploy-linux.sh <executable>
-#   (Simplified) bash re-implementation of [linuxdeploy](https://github.com/linuxdeploy).
-#   Reads [executable] and copies required libraries to [AppDir]/usr/lib
-#   Copies the desktop and svg icon to [AppDir]
-#   Respects the AppImage excludelist
-#
-# Unlike linuxdeploy, this does not:
-# - Copy any icon other than svg (too lazy to add that without a test case)
-# - Do any verification on the desktop file
-# - Run any linuxdeploy plugins
-# - *Probably other things I didn't know linuxdeploy can do*
-#
-# It notably also does not copy unneeded libraries, unlike linuxdeploy. On a desktop system, this
-# can help reduce the end AppImage's size, although in a production system this script proved
-# unhelpful.
+# fork of https://github.com/lat9nq/deploy/tree/main
+# made POSIX and extended with more functionality and improvements
 #~ set -x
 
-# safety checks and set vars
+# set vars
 NOT_FOUND=""
 TARGET="$(command -v "$1" 2>/dev/null)"
-APPDIR="$2"
-FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
-EXCLUDES="$(wget -q "$FORBIDDEN" -O - | sed 's/#.*//; /^$/d')"
-LIB_DIR="$(readlink -m $(dirname $TARGET)/../lib)"
-PLUGIN_DIR="$LIB_DIR/../plugins"
+[ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
+[ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
+                                platforminputcontexts platformthemes \
+                                xcbglintegrations iconengines"
+# safety checks
 if [ -z "$1" ]; then
     echo "USAGE: $0 /path/to/binary"
     echo "USAGE: $0 /path/to/binary /path/to/AppDir"
-    exit 1
-elif [ -z $TARGET ]; then
-    echo "ERROR: Missing \"$1\"!"
+    echo "USAGE: DEPLOY_QT=1 $0 /path/to/binary /path/to/AppDir"
+    echo "USAGE: SKIP=\"libA.so libB.so\" $0 /path/to/binary /path/to/AppDir"
     exit 1
 elif ! command -v patchelf 1>/dev/null; then
     echo "ERROR: Missing patchelf dependency!"
@@ -37,70 +23,90 @@ elif ! command -v patchelf 1>/dev/null; then
 elif ! command -v wget 1>/dev/null; then
     echo "ERROR: Missing wget dependency!"
     exit 1
-elif [ -z "$EXCLUDES" ]; then
-    echo "ERROR: Could not download the exclude list, no internet?"
-    exit 1
 fi
-[ -z "$PREFIX" ] && PREFIX="/usr"
-[ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
-[ -z "$QT_PLUGIN_PATH" ] && QT_PLUGIN_PATH="$PREFIX/lib64/qt5/plugins"
-[ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
-                                platforminputcontexts platformthemes \
-                                xcbglintegrations iconengines"
-# Look for a lib dir next to each instance of PATH
-for libpath in $LIB_DIRS; do
-    for path in $(printf $PATH | tr ':' ' '); do
-        TRY_PATH="$(readlink -e "$path/../$libpath" 2>/dev/null)"
-        [ -n "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
+
+# checks target binary, creates appdir if needed and check systems dirs
+_check_dirs_and_target() {
+    if ! command -v "$TARGET" 1>/dev/null; then
+        echo "ERROR: \"$TARGET\" is not a valid argument or wasn't found"
+        exit 1
+    fi
+    if [ -n "$2" ]; then
+        APPDIR="$2"
+        mkdir -p "$APPDIR"/usr/bin/../lib/../share/applications || exit 1
+        LIB_DIR="$APPDIR/usr/lib"
+    else
+        LIB_DIR="$(readlink -m $(dirname $TARGET)/../lib)"
+    fi
+    mkdir -p "$LIB_DIR" || exit 1
+    
+    # Look for a lib dir next to each instance of PATH
+    for libpath in $LIB_DIRS; do
+        for path in $(printf $PATH | tr ':' ' '); do
+            TRY_PATH="$(readlink -e "$path/../$libpath" 2>/dev/null)"
+            [ -n "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
+        done
     done
-done
-TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
-LIB_PATHS="$(echo "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
-QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-    -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
+    TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
+    LIB_PATHS="$(echo "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
+    printf '\n%s\n' "All checks passed! deploying..."
+}
 
-export EXCLUDES
-export LIB_DIRS
-export PREFIX
-export QT_PLUGIN_PATH
-export LIB_PATHS
+# get deny list
+_get_deny_list() {
+    FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
+    EXCLUDES="$(wget "$FORBIDDEN" -O - 2>/dev/null | sed 's/#.*//; /^$/d')"
+    if [ -z "$EXCLUDES" ] && [ "$DEPLOY_ALL" != 1 ]; then
+        echo "ERROR: Could not download the exclude list, no internet?"
+        exit 1
+    fi
+    # add extra libs to the excludelist
+    if [ -n "$SKIP" ]; then
+        SKIP=$(echo "$SKIP" | tr ' ' '\n')
+        printf '\n%s\n' 'Got it! Ignoring the following libraries:'
+        printf '%s\n\n' "$SKIP"
+        EXCLUDES=$(printf '%s\n%s' "$EXCLUDES" "$SKIP")
+    fi
+}
 
-# declare functions
+# deploy dependencies
 _get_deps() {
-    local DESTDIR=$2
-    local needed_libs=$(patchelf --print-needed $1 | tr '\n' ' ')
-    for i in $needed_libs; do
-        # check it isn't in the exclude list or it is already deployed
-        if echo "$EXCLUDES" | grep -q $i; then
-            echo "$i is on the exclude list... skipping"
+    DESTDIR=$2
+    needed_libs=$(patchelf --print-needed $1 | tr '\n' ' ')
+    for lib in $needed_libs; do
+        # check lib is not in the exclude list or is not already deployed
+        if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
+            echo "$lib is on the exclude list... skipping"
             continue
-        elif [ -f $DESTDIR/$i ]; then
-            echo "$i is already deployed... skipping"
+        elif [ -f $DESTDIR/$lib ]; then
+            echo "$lib is already deployed... skipping"
             continue
         fi
-        _LIB=""
-        # this is cursed omg
-        for lib in $LIB_PATHS; do
-            _PATH=$(find $lib -regex ".*$(printf $i | tr '+' '.')" -print -quit)
-            if [ -n "$_PATH" ]; then
-                _LIB=$(readlink -e $_PATH | tr '\n' ' ') 
-                if [ -z $_LIB ]; then
-                    >&2 printf '\n%s\n\n' "ERROR: could not find \"$i\""
-                    NOT_FOUND="$NOT_FOUND:$i"
-                    continue
-                fi
-                break
-            fi
-        done
+        
+        # find the path to the lib and check it exists
+        foundlib="$(readlink -e $(find $LIB_PATHS \
+            -regex ".*$(echo $lib | tr '+' '.')" -print -quit))"
+        if [ -z "$foundlib" ]; then
+            printf '\n%s\n\n' "ERROR: could not find \"$lib\""
+            NOT_FOUND="$NOT_FOUND:$lib"
+            continue
+        fi
+        
         # copy libs to appdir
-        cp -v $_LIB $DESTDIR/$i &
-        _get_deps $_LIB $DESTDIR
+        cp -v "$foundlib" $DESTDIR/$lib &
+        _get_deps "$foundlib" "$DESTDIR"
     done
 }
 
 _deploy_qt() {
-    mkdir -p $PLUGIN_DIR/platforms
-    cp -nv "${QT_PLUGIN_PATH}/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
+    [ "$DEPLOY_QT" != "1" ] && return 0
+    PLUGIN_DIR="$LIB_DIR/../plugins"
+    QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
+      -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
+    
+    mkdir -p $PLUGIN_DIR/platforms || exit 1
+    cp -nv "$QT_PLUGIN_PATH/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
+    
     # Find any remaining libraries needed for Qt libraries
     _get_deps $PLUGIN_DIR/platforms/libqxcb.so $LIB_DIR
     for plugin in $QT_PLUGINS; do
@@ -109,13 +115,15 @@ _deploy_qt() {
         find $PLUGIN_DIR/ \
         -type f -regex '.*\.so' \
         -exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'
+        
         # Find any remaining libraries needed for Qt libraries
         for file in "$PLUGIN_DIR/$plugin"/*; do
             [ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
         done
     done
+    
     # make qt.conf file   
-    QT_CONF=${LIB_DIR}/../bin/qt.conf
+    QT_CONF=$LIB_DIR/../bin/qt.conf
     echo "[Paths]" > $QT_CONF
     echo "Prefix = ../" >> $QT_CONF
     echo "Plugins = plugins" >> $QT_CONF
@@ -123,18 +131,33 @@ _deploy_qt() {
     echo "Qml2Imports = qml" >> $QT_CONF
 }
 
-# Fix rpath of libraries and executable so they can find the packaged libraries
-_patch_libs_path() {
-  find ${LIB_DIR} -type f -exec patchelf --set-rpath '$ORIGIN' {} ';'
+# patch the rest of libraries and binary
+_patch_libs_and_bin_path() {
+  find $LIB_DIR -type f -exec patchelf --set-rpath '$ORIGIN' {} ';'
   patchelf --set-rpath '$ORIGIN/../lib' "$TARGET"
 }
 
-# logic
-mkdir -p $LIB_DIR $PLUGIN_DIR || exit 1
+# output warning for missing libs
+_check_not_found_libs() {
+    if [ -n "$NOT_FOUND" ]; then
+        echo ""
+        echo "WARNING: Failed to find the following libraries:"
+        echo $NOT_FOUND | tr ':' '\n' | sort -u
+        echo ""
+    fi
+    if [ -n "$SKIP" ]; then
+        echo ""
+        echo "The following libraries were ignored:"
+        echo "$SKIP"
+        echo ""
+    fi
+    echo "All Done!"
+}
+
+# do the thing
+_check_dirs_and_target
+_get_deny_list
 _get_deps $TARGET $LIB_DIR
-[ "$DEPLOY_QT" = "1" ] && _deploy_qt
-_patch_libs_path
-if [ -n "$NOT_FOUND" ]; then
-  echo "WARNING: failed to find the following libraries:"
-  echo $NOT_FOUND | tr ':' '\n' | sort -u
-fi
+_deploy_qt
+_patch_libs_and_bin_path
+_check_not_found_libs
