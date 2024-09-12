@@ -62,8 +62,8 @@ _check_dirs_and_target() {
 		BINDIR="$APPDIR/usr/bin"
 		LIB_DIR="$APPDIR/usr/lib"
 		mkdir -p "$BINDIR" "$LIB_DIR" || exit 1
-		cp "$TARGET" "$BINDIR"/"$BIN" || exit 1
-		TARGET="$(command -v "$BINDIR"/"$BIN" 2>/dev/null)"
+		cp "$TARGET" "$BINDIR" || exit 1
+		TARGET="$(command -v "$BINDIR"/* 2>/dev/null)"
 		[ -z "$TARGET" ] && exit 1
 	else
 		BINDIR="$(dirname $TARGET)"
@@ -71,6 +71,7 @@ _check_dirs_and_target() {
 		LIB_DIR="$(readlink -m $BINDIR/../lib)"
 		mkdir -p "$BINDIR" "$LIB_DIR" || exit 1
 	fi
+	[ ! -w "$APPDIR" ] && echo "ERROR: Cannot write to \"$APPDIR\"" && exit 1
 	# these symlinks are made for compatibility with deploy all mode
 	[ ! -d "$APPDIR"/usr/lib64 ] && ln -s ./lib "$APPDIR"/usr/lib64
 	[ ! -d "$APPDIR"/lib64 ]     && ln -s ./usr/lib "$APPDIR"/lib64
