@@ -1,4 +1,5 @@
 #!/bin/sh
+
 # fork of https://github.com/lat9nq/deploy/tree/main
 # made POSIX and extended with more functionality and improvements
 #
@@ -16,19 +17,23 @@
 # defaults: audio bearer imageformats mediaservice platforminputcontexts 
 #		   platformthemes xcbglintegrations iconengines
 #
-#~ set -x
-
+[ "$DEBUG" = 1 ] && set -x
 # set vars
 NOT_FOUND=""
 BIN="$1"
 APPDIR="$2"
+TOTAL_LIBS=0
 TARGET="$(realpath "$(command -v "$BIN" 2>/dev/null)" 2>/dev/null)"
 APPRUN="https://raw.githubusercontent.com/AppImage/AppImageKit/master/resources/AppRun"
+APPRUN_ALL="https://raw.githubusercontent.com/Samueru-sama/deploy/main/AppRun"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 [ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
 [ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
 					platforminputcontexts platformthemes \
 					xcbglintegrations iconengines"
+LINE="-----------------------------------------------------------"
+[ "$DEPLOY_ALL" = 1 ] && APPRUN="$APPRUN_ALL"
+
 # safety checks
 if [ -z "$1" ]; then
 	cat <<-EOF
@@ -57,7 +62,7 @@ _check_dirs_and_target() {
 		BINDIR="$APPDIR/usr/bin"
 		LIB_DIR="$APPDIR/usr/lib"
 		mkdir -p "$BINDIR" "$LIB_DIR" || exit 1
-		cp "$TARGET" "$BINDIR"/"$1" || exit 1
+		cp "$TARGET" "$BINDIR"/"$BIN" || exit 1
 		TARGET="$(command -v "$BINDIR"/"$BIN" 2>/dev/null)"
 		[ -z "$TARGET" ] && exit 1
 	else
@@ -66,7 +71,10 @@ _check_dirs_and_target() {
 		LIB_DIR="$(readlink -m $BINDIR/../lib)"
 		mkdir -p "$BINDIR" "$LIB_DIR" || exit 1
 	fi
-	
+	# these symlinks are made for compatibility with deploy all mode
+	[ ! -d "$APPDIR"/usr/lib64 ] && ln -s ./lib "$APPDIR"/usr/lib64
+	[ ! -d "$APPDIR"/lib64 ]     && ln -s ./usr/lib "$APPDIR"/lib64
+
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
 		for path in $(printf $PATH | tr ':' ' '); do
@@ -77,48 +85,61 @@ _check_dirs_and_target() {
 	TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
 	LIB_PATHS="$(printf "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
 	cat <<-EOF
-	------------------------------------------------------------
+	"$LINE"
 	Initial checks passed! deploying...
 	AppDir = "$APPDIR"
 	Deploy binary = "$TARGET"
 	Deploy libs = "$LIB_DIR"
 	I will look for host libraries in: $LIB_PATHS
-	------------------------------------------------------------
+	"$LINE"
 	EOF
 }
 
-# get deny list
-_get_deny_list() {
-	EXCLUDES="$(wget "$FORBIDDEN" -O - 2>/dev/null | sed 's/#.*//; /^$/d')"
-	if [ -z "$EXCLUDES" ] && [ "$DEPLOY_ALL" != 1 ]; then
-		echo "ERROR: Could not download the exclude list, no internet?"
-		exit 1
-	fi
+# check for skipped libraries and get deny list
+_check_skip_and_get_denylist() {
 	# add extra libs to the excludelist
 	if [ -n "$SKIP" ]; then
 		SKIP=$(echo "$SKIP" | tr ' ' '\n')
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 		echo 'Got it! Ignoring the following libraries:'
 		echo "$SKIP"
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 		EXCLUDES=$(printf '%s\n%s' "$EXCLUDES" "$SKIP")
+	fi
+	if [ "$DEPLOY_QT" = "1" ]; then
+		echo "$LINE"	
+		echo 'Got it! Will be deploying Qt'
+		echo "$LINE"
+	fi
+	if [ "$DEPLOY_ALL" = 1 ]; then
+		echo "$LINE"	
+		echo 'Got it! Ignoring exclude list and deploy all libs'
+		echo "$LINE"
+	else
+		EXCLUDES="$(wget "$FORBIDDEN" -O - 2>/dev/null | sed 's/#.*//; /^$/d')"
+		if [ -z "$EXCLUDES" ]; then
+			echo "ERROR: Could not download the exclude list, no internet?"
+			exit 1
+		fi
 	fi
 }
 
 # deploy dependencies
 _get_deps() {
-	DESTDIR=$2
-	needed_libs=$(patchelf --print-needed $1 | tr '\n' ' ')
+	needed_libs=$(patchelf --print-needed "$1" | tr '\n' ' ')
+	DESTDIR="$2"	
 	for lib in $needed_libs; do
 		# check lib is not in the exclude list or is not already deployed
 		if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
 			echo "$lib is on the exclude list... skipping"
 			continue
 		elif [ -f $DESTDIR/$lib ]; then
-			echo "$lib is already deployed... skipping"
+			if ! echo $deployedlib | grep -q "$lib"; then
+				echo "$lib is already deployed... skipping"
+			fi
+			deployedlib="$deployedlib $lib" # avoid repeating message
 			continue
-		fi
-		
+		fi	
 		# find the path to the lib and check it exists
 		foundlib="$(readlink -e $(find $LIB_PATHS \
 			-regex ".*$(echo $lib | tr '+' '.')" -print -quit))"
@@ -126,38 +147,42 @@ _get_deps() {
 			printf '\n%s\n\n' "ERROR: could not find \"$lib\""
 			NOT_FOUND="$NOT_FOUND:$lib"
 			continue
-		fi
-		
-		# copy libs to appdir
+		fi		
+		# copy libs and their dependencies to the appdir
 		cp -v "$foundlib" $DESTDIR/$lib &
 		_get_deps "$foundlib" "$DESTDIR"
+		TOTAL_LIBS=$(( $TOTAL_LIBS + 1 ))
 	done
 }
 
 _deploy_qt() {
-	[ "$DEPLOY_QT" != "1" ] && return 0
-	PLUGIN_DIR="$LIB_DIR/../plugins"
+	if [ "$DEPLOY_QT" = "1" ]; then
+		echo "$LINE"	
+		echo 'Deploying Qt...'
+		echo "$LINE"
+	else
+		return 0
+	fi
+	PLUGIN_DIR="$LIB_DIR"/../plugins
 	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
 	  -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
 	
-	mkdir -p $PLUGIN_DIR/platforms || exit 1
-	cp -nv "$QT_PLUGIN_PATH/platforms/libqxcb.so" $PLUGIN_DIR/platforms/
+	mkdir -p "$PLUGIN_DIR"/platforms || exit 1
+	cp -nv "$QT_PLUGIN_PATH"/platforms/libqxcb.so "$PLUGIN_DIR"/platforms/
 	
 	# Find any remaining libraries needed for Qt libraries
-	_get_deps $PLUGIN_DIR/platforms/libqxcb.so $LIB_DIR
+	_get_deps "$PLUGIN_DIR"/platforms/libqxcb.so "$LIB_DIR"
+	
 	for plugin in $QT_PLUGINS; do
 		mkdir -p $PLUGIN_DIR/$plugin
 		cp -rnv $QT_PLUGIN_PATH/$plugin/*.so $PLUGIN_DIR/$plugin
-		find $PLUGIN_DIR/ \
-		-type f -regex '.*\.so' \
-		-exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'
-		
+		find $PLUGIN_DIR/ -type f -regex '.*\.so' \
+			-exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'		
 		# Find any remaining libraries needed for Qt libraries
 		for file in "$PLUGIN_DIR/$plugin"/*; do
 			[ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
 		done
-	done
-	
+	done	
 	# make qt.conf file   
 	QT_CONF="$BINDIR"/qt.conf
 	echo "[Paths]" > $QT_CONF
@@ -171,20 +196,20 @@ _check_icon_and_desktop() {
 	# find and copy .desktop
 	NAME="$(echo "$TARGET" | awk -F"/" '{print $NF}')"
 	if [ ! -f "$APPDIR"/*.desktop ]; then
-		echo ------------------------------------------------------------
+		echo "$LINE"
 		echo "Trying to find .desktop for \"$TARGET\""...
 		DESKTOP=$(find "$APPDIR" "$HOME" /usr/share /opt -type f -iregex \
 			".*/applications/.*$NAME.*\.desktop" 2>/dev/null | head -1)
 		if [ -n "$DESKTOP" ] && cp "$DESKTOP" "$APPDIR"/"$NAME".desktop; then
 			echo "Found .desktop and added it to \"$APPDIR\""
 		else
-			printf '\n%s\n\n' "ERROR: Could not find .desktop for \"$TARGET\""
+			echo "ERROR: Could not find .desktop for \"$TARGET\""
 		fi
-		echo ------------------------------------------------------------
+		echo "$LINE"
 	fi
 	# find and copy icon
 	if [ ! -f "$APPDIR"/.DirIcon ]; then
-		echo ------------------------------------------------------------
+		echo "$LINE"
 		echo "Trying to find icon for \"$TARGET\""...
 		ICON=$(find "$APPDIR" "$HOME" /usr/share /opt -type f -iregex \
 			".*/icons/.*$NAME.*\.\(png\|svg\)" 2>/dev/null | head -1)
@@ -192,24 +217,34 @@ _check_icon_and_desktop() {
 			ln -s "$APPDIR"/"$NAME" "$APPDIR/.DirIcon"
 			echo "Found icon and added it to \"$APPDIR\""
 		else
-			printf '\n%s\n\n' "ERROR: Could not find icon for \"$TARGET\""
+			echo "ERROR: Could not find icon for \"$TARGET\""
 		fi
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 	fi
 }
 
 _check_apprun() {
 	if [ ! -f "$APPDIR"/AppRun ]; then
-		echo ------------------------------------------------------------
-		echo "No AppRun in \"$APPDIR\", downloading a generic one..."
+		echo "$LINE"
+		echo "Downloading AppRun..."
 		if wget "$APPRUN" -O "$APPDIR"/AppRun 2>/dev/null; then
 			chmod +x "$APPDIR"/AppRun
-			echo "Added generic AppRun to \"$APPDIR\""
-			echo "Note that the generic AppRun may need some fixes to work"
+			echo "Added AppRun to \"$APPDIR\""
+			echo "AppRun source: \"$APPRUN\""
+			echo "Note that this AppRun may need some fixes to work"
 		else
 			echo "ERROR: Could not download generic AppRun, no internet?"
 		fi
-		echo ------------------------------------------------------------
+		echo "$LINE"
+	elif [ "$DEPLOY_ALL" = 1 ]; then
+		cat <<-EOF
+		$LINE
+		I detected you provided your own AppRun with DEPLOY_ALL=1
+		Note that when deploying everything a specific AppRun is needed
+		If you wish to use it, do not create it and I will download and
+		place the specific AppRun in $APPDIR
+		$LINE
+		EOF
 	fi
 }
 
@@ -222,23 +257,31 @@ _patch_libs_and_bin_path() {
 # output warning for missing libs
 _check_not_found_libs() {
 	if [ -n "$SKIP" ]; then
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 		echo "The following libraries were ignored:"
 		echo "$SKIP"
-		echo ------------------------------------------------------------	
+		echo "$LINE"
 	fi
 	if [ -n "$NOT_FOUND" ]; then
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 		echo "WARNING: Failed to find the following libraries:"
 		echo $NOT_FOUND | tr ':' '\n' | sort -u
-		echo ------------------------------------------------------------	
+		echo "$LINE"	
 	fi
+	echo "$LINE"
 	echo "All Done!"
+	if [ "$TOTAL_LIBS" -gt 0 ]; then
+		echo "Deployed a total of $TOTAL_LIBS libraries"
+	else
+		echo "WARNING: No libraries have been deployed"
+		echo "Did you run $0 more than once?"
+	fi
+	echo "$LINE"
 }
 
 # do the thing
-_check_dirs_and_target "$@"
-_get_deny_list
+_check_dirs_and_target
+_check_skip_and_get_denylist
 _get_deps $TARGET $LIB_DIR
 _deploy_qt
 _patch_libs_and_bin_path
