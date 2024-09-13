@@ -9,12 +9,12 @@
 # "USAGE: SKIP=\"libA.so libB.so\" $0 /path/to/binary /path/to/AppDir"
 #
 #  user defined variables:
-# "$LIB_DIRS" names of the library directories on the HOST system to search 
+# "$LIB_DIRS" names of the library directories on the HOST system to search
 #  defaults: lib64 lib
 # "$SKIP" names of the libraries you wish to skip, each enty space separated
 # "$DEPLOY_QT" when set to 1 it enables the deploying of Qt plugins
 # "$QT_PLUGINS" names of the Qt plugins to deploy
-# defaults: audio bearer imageformats mediaservice platforminputcontexts 
+# defaults: audio bearer imageformats mediaservice platforminputcontexts
 #		   platformthemes xcbglintegrations iconengines
 #
 [ "$DEBUG" = 1 ] && set -x
@@ -27,15 +27,15 @@ TARGET="$(realpath "$(command -v "$BIN" 2>/dev/null)" 2>/dev/null)"
 APPRUN="https://raw.githubusercontent.com/Samueru-sama/deploy/main/AppRun"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 [ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
-[ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
-					platforminputcontexts platformthemes \
-					xcbglintegrations iconengines"
+[ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer generic imageformats styles \
+			platformthemes mediaservice platforms iconengines \
+			platforminputcontexts xcbglintegrations "
 LINE="-----------------------------------------------------------"
 BINPATCH='$ORIGIN/../lib:$ORIGIN'
+LIBPATCH='$ORIGIN:$ORIGIN/../bin'
 QTLIBPATCH='$ORIGIN/../../lib:$ORIGIN'
-LIBPATCH='$ORIGIN:$ORIGIN/../bin:$ORIGIN/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/gtk-3.0/3.0.0/immodules:$ORIGIN/gtk-3.0/3.0.0/printbackends'
 BINPATCH_GTK='$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/../lib/gtk-3.0/3.0.0/immodules:$ORIGIN/../lib/gtk-3.0/3.0.0/printbackends'
-LIBPATCH_GTK='$ORIGIN:$ORIGIN/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/gtk-3.0/3.0.0/immodules:$ORIGIN/gtk-3.0/3.0.0/printbackends'
+LIBPATCH_GTK='$ORIGIN:$ORIGIN/../bin:$ORIGIN/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/gtk-3.0/3.0.0/immodules:$ORIGIN/gtk-3.0/3.0.0/printbackends'
 
 # safety checks
 if [ -z "$1" ]; then
@@ -46,6 +46,9 @@ if [ -z "$1" ]; then
 	"USAGE: SKIP=\"libA.so libB.so\" $0 /path/to/binary /path/to/AppDir"
 	EOF
 	exit 1
+elif ! command -v find 1>/dev/null; then
+	echo "ERROR: Missing find dependency!"
+	exit 1
 elif ! command -v patchelf 1>/dev/null; then
 	echo "ERROR: Missing patchelf dependency!"
 	exit 1
@@ -55,6 +58,11 @@ elif ! command -v wget 1>/dev/null; then
 elif [ -z "$TARGET" ]; then
 	echo "ERROR: \"$1\" is not a valid argument or wasn't found"
 	exit 1
+elif ! command -v strip 1>/dev/null; then
+	echo "ERROR: Missing strip dependency! It is advised that you install strip"
+	echo "This script can work without it, so we are continuing..."
+	NO_STRIP=true
+	sleep 2
 fi
 
 # checks target binary, creates appdir if needed and check systems dirs
@@ -88,36 +96,35 @@ _check_dirs_and_target() {
 	TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
 	LIB_PATHS="$(printf "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
 	cat <<-EOF
-	"$LINE"
+	$LINE
 	Initial checks passed! deploying...
 	AppDir = "$APPDIR"
 	Deploy binary = "$TARGET"
 	Deploy libs = "$LIB_DIR"
 	I will look for host libraries in: $LIB_PATHS
-	"$LINE"
+	$LINE
 	EOF
 }
 
-# check for skipped libraries and get deny list
-_check_skip_and_get_denylist() {
+# check options and get deny list
+_check_options_and_get_denylist() {
 	# add extra libs to the excludelist
+	echo "$LINE"
 	if [ -n "$SKIP" ]; then
-		SKIP=$(echo "$SKIP" | tr ' ' '\n')
-		echo "$LINE"	
+		SKIP=$(echo "$SKIP" | tr ' ' '\n')	
 		echo 'Got it! Ignoring the following libraries:'
-		echo "$SKIP"
-		echo "$LINE"	
 		EXCLUDES=$(printf '%s\n%s' "$EXCLUDES" "$SKIP")
 	fi
-	if [ "$DEPLOY_QT" = "1" ]; then
-		echo "$LINE"	
+	if [ "$DEPLOY_QT" = 1 ]; then
 		echo 'Got it! Will be deploying Qt'
-		echo "$LINE"
+	fi
+	if [ "$DEPLOY_GTK" = 1 ]; then
+		echo 'Got it! Will be deploying GTK'
+		LIBPATCH="$LIBPATCH_GTK"
+		BINPATCH="$BINPATCH_GTK"
 	fi
 	if [ "$DEPLOY_ALL" = 1 ]; then
-		echo "$LINE"	
 		echo 'Got it! Ignoring exclude list and deploy all libs'
-		echo "$LINE"
 	else
 		EXCLUDES="$(wget "$FORBIDDEN" -O - 2>/dev/null | sed 's/#.*//; /^$/d')"
 		if [ -z "$EXCLUDES" ]; then
@@ -125,6 +132,7 @@ _check_skip_and_get_denylist() {
 			exit 1
 		fi
 	fi
+	echo "$LINE"
 }
 
 # deploy dependencies
@@ -162,38 +170,38 @@ _get_deps() {
 }
 
 _deploy_qt() {
-	if [ "$DEPLOY_QT" = "1" ]; then
-		echo "$LINE"	
-		echo 'Deploying Qt...'
-		echo "$LINE"
-	else
-		return 0
-	fi
+	[ "$DEPLOY_QT" != 1 ] && return 0
+	echo "$LINE"	
+	echo 'Deploying Qt...'
+	echo "$LINE"
 	PLUGIN_DIR="$LIB_DIR"/../plugins
 	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
 	  -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
-	# copy qt plugins
-	mkdir -p "$PLUGIN_DIR"/platforms || exit 1
-	cp -nv "$QT_PLUGIN_PATH"/platforms/libqxcb.so "$PLUGIN_DIR"/platforms/		
+	# copy qt plugins	
 	for plugin in $QT_PLUGINS; do
 		mkdir -p "$PLUGIN_DIR"/$plugin
-		cp -rnv "$QT_PLUGIN_PATH"/$plugin/*.so "$PLUGIN_DIR"/$plugin	
+		cp -rnv "$QT_PLUGIN_PATH"/$plugin/*.so "$PLUGIN_DIR"/$plugin
 	done
+	if [ ! -f "$PLUGIN_DIR"/platforms/libqxcb.so ]; then
+		echo "ERROR: Could not deploy libqxcb.so plugin"
+		exit 1
+	fi
 	# Find any remaining libraries needed for Qt libraries
 	for file in $(find "$PLUGIN_DIR"/* -type f -regex '.*\.so.*'); do
 		[ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
 	done
-	# make qt.conf file   
-	QT_CONF="$BINDIR"/qt.conf
-	echo "[Paths]" > $QT_CONF
-	echo "Prefix = ../" >> $QT_CONF
-	echo "Plugins = plugins" >> $QT_CONF
-	echo "Imports = qml" >> $QT_CONF
-	echo "Qml2Imports = qml" >> $QT_CONF
+	# make qt.conf file
+	cat <<-EOF > "$BINDIR"/qt.conf
+	[Paths]
+	Prefix = ../
+	Plugins = plugins
+	Imports = qml
+	Qml2Imports = qml
+	EOF
 }
 
 _deploy_gtk() {
-	[ "$DEPLOY_GTK" != "1" ] && return 0
+	[ "$DEPLOY_GTK" != 1 ] && return 0
 	# determine gtk version
 	needed_lib="$(patchelf --print-needed "$TARGET" | tr ' ' '\n')"
 	echo "$LINE"
@@ -203,7 +211,7 @@ _deploy_gtk() {
 	elif echo "$needed_lib" | grep -q "libgtk-4.so"; then
 ###################################################################
 		echo "GTK4 not ready" && exit 1
-###################################################################	
+###################################################################
 		echo "Deploying GTK4..."
 		GTKVER="gtk-4.0"
 	else	
@@ -270,7 +278,7 @@ _check_icon_and_desktop() {
 		else
 			echo "ERROR: Could not find icon for \"$TARGET\""
 		fi
-		echo "$LINE"	
+		echo "$LINE"
 	fi
 }
 
@@ -306,11 +314,6 @@ _patch_libs_and_bin_rpath() {
 		find "$PLUGIN_DIR"/ -type f -regex '.*\.so.*' -exec \
 			patchelf --set-rpath "$QTLIBPATCH" {} ';'
 	fi
-	# patch gtk libs
-	if [ "$DEPLOY_GTK" = 1 ]; then
-		LIBPATCH="$LIBPATCH_GTK"
-		BINPATCH="$BINPATCH_GTK"	
-	fi
 	# patch rest of libraries
 	find "$LIB_DIR" -maxdepth 1 -type f -regex '.*\.so.*' -exec \
 		patchelf --set-rpath "$LIBPATCH" {} ';'
@@ -325,6 +328,14 @@ _patch_libs_and_bin_rpath() {
 		patchelf --set-rpath "$BINPATCH" {} ';' 2>/dev/null
 	# make sure binaries have exec perms
 	chmod +x "$BINDIR"/*
+	# likely overkill
+	cd "$LIB_DIR" && find ./*/* -type f -regex '.*\.so.*' -exec \
+		ln -s {} "$LIB_DIR" ';' 2>/dev/null
+	# strip everything
+	[ "$NO_STRIP" = "true" ] && return 0
+	echo "Stripping uneeded symbols..."
+	strip --strip-debug "$LIB_DIR"/* 2>/dev/null
+	strip --strip-unneeded "$BINDIR"/* 2>/dev/null
 }
 
 # output warning for missing libs
@@ -354,7 +365,7 @@ _check_not_found_libs() {
 
 # do the thing
 _check_dirs_and_target
-_check_skip_and_get_denylist
+_check_options_and_get_denylist
 _get_deps $TARGET $LIB_DIR
 _deploy_qt
 _deploy_gtk
