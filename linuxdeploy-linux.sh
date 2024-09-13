@@ -24,15 +24,18 @@ BIN="$1"
 APPDIR="$2"
 TOTAL_LIBS=0
 TARGET="$(realpath "$(command -v "$BIN" 2>/dev/null)" 2>/dev/null)"
-APPRUN="https://raw.githubusercontent.com/AppImage/AppImageKit/master/resources/AppRun"
-APPRUN_ALL="https://raw.githubusercontent.com/Samueru-sama/deploy/main/AppRun"
+APPRUN="https://raw.githubusercontent.com/Samueru-sama/deploy/main/AppRun"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 [ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
 [ -z "$QT_PLUGINS" ] && QT_PLUGINS="audio bearer imageformats mediaservice \
 					platforminputcontexts platformthemes \
 					xcbglintegrations iconengines"
 LINE="-----------------------------------------------------------"
-[ "$DEPLOY_ALL" = 1 ] && APPRUN="$APPRUN_ALL"
+BINPATCH='$ORIGIN/../lib:$ORIGIN'
+QTLIBPATCH='$ORIGIN/../../lib:$ORIGIN'
+LIBPATCH='$ORIGIN:$ORIGIN/../bin:$ORIGIN/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/gtk-3.0/3.0.0/immodules:$ORIGIN/gtk-3.0/3.0.0/printbackends'
+BINPATCH_GTK='$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/../lib/gtk-3.0/3.0.0/immodules:$ORIGIN/../lib/gtk-3.0/3.0.0/printbackends'
+LIBPATCH_GTK='$ORIGIN:$ORIGIN/gdk-pixbuf-2.0/2.10.0/loaders:$ORIGIN/gtk-3.0/3.0.0/immodules:$ORIGIN/gtk-3.0/3.0.0/printbackends'
 
 # safety checks
 if [ -z "$1" ]; then
@@ -75,7 +78,6 @@ _check_dirs_and_target() {
 	# these symlinks are made for compatibility with deploy all mode
 	[ ! -d "$APPDIR"/usr/lib64 ] && ln -s ./lib "$APPDIR"/usr/lib64
 	[ ! -d "$APPDIR"/lib64 ]     && ln -s ./usr/lib "$APPDIR"/lib64
-
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
 		for path in $(printf $PATH | tr ':' ' '); do
@@ -132,7 +134,10 @@ _get_deps() {
 	for lib in $needed_libs; do
 		# check lib is not in the exclude list or is not already deployed
 		if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
-			echo "$lib is on the exclude list... skipping"
+			if ! echo $skippedlib | grep -q "$lib"; then
+				echo "$lib is on the exclude list... skipping"
+			fi
+			skippedlib="$skippedlib $lib" # avoid repeating message
 			continue
 		elif [ -f $DESTDIR/$lib ]; then
 			if ! echo $deployedlib | grep -q "$lib"; then
@@ -167,23 +172,17 @@ _deploy_qt() {
 	PLUGIN_DIR="$LIB_DIR"/../plugins
 	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
 	  -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
-	
+	# copy qt plugins
 	mkdir -p "$PLUGIN_DIR"/platforms || exit 1
-	cp -nv "$QT_PLUGIN_PATH"/platforms/libqxcb.so "$PLUGIN_DIR"/platforms/
-	
-	# Find any remaining libraries needed for Qt libraries
-	_get_deps "$PLUGIN_DIR"/platforms/libqxcb.so "$LIB_DIR"
-	
+	cp -nv "$QT_PLUGIN_PATH"/platforms/libqxcb.so "$PLUGIN_DIR"/platforms/		
 	for plugin in $QT_PLUGINS; do
-		mkdir -p $PLUGIN_DIR/$plugin
-		cp -rnv $QT_PLUGIN_PATH/$plugin/*.so $PLUGIN_DIR/$plugin
-		find $PLUGIN_DIR/ -type f -regex '.*\.so' \
-			-exec patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' {} ';'		
-		# Find any remaining libraries needed for Qt libraries
-		for file in "$PLUGIN_DIR/$plugin"/*; do
-			[ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
-		done
-	done	
+		mkdir -p "$PLUGIN_DIR"/$plugin
+		cp -rnv "$QT_PLUGIN_PATH"/$plugin/*.so "$PLUGIN_DIR"/$plugin	
+	done
+	# Find any remaining libraries needed for Qt libraries
+	for file in $(find "$PLUGIN_DIR"/* -type f -regex '.*\.so.*'); do
+		[ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
+	done
 	# make qt.conf file   
 	QT_CONF="$BINDIR"/qt.conf
 	echo "[Paths]" > $QT_CONF
@@ -191,6 +190,57 @@ _deploy_qt() {
 	echo "Plugins = plugins" >> $QT_CONF
 	echo "Imports = qml" >> $QT_CONF
 	echo "Qml2Imports = qml" >> $QT_CONF
+}
+
+_deploy_gtk() {
+	[ "$DEPLOY_GTK" != "1" ] && return 0
+	# determine gtk version
+	needed_lib="$(patchelf --print-needed "$TARGET" | tr ' ' '\n')"
+	echo "$LINE"
+	if echo "$needed_lib" | grep -q "libgtk-3.so"; then
+		echo "Deploying GTK3..."
+		GTKVER="gtk-3.0"
+	elif echo "$needed_lib" | grep -q "libgtk-4.so"; then
+###################################################################
+		echo "GTK4 not ready" && exit 1
+###################################################################	
+		echo "Deploying GTK4..."
+		GTKVER="gtk-4.0"
+	else	
+		echo "ERROR: This application has no gtk dependency!"	
+		return 1
+	fi
+	echo "$LINE"
+	# find path to the gtk and gdk dirs (gdk needed by gtk)
+	GTK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
+	  -regex ".*/$GTKVER" 2>/dev/null | head -1)")"
+	GDK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
+	  -regex ".*/gdk-pixbuf-.*" 2>/dev/null | head -1)")"
+	if [ -z "$GTK_PATH" ] || [ -z "$GDK_PATH" ]; then 
+		echo "ERROR: Could not find all gtk and/or gdk-pixbuf libs on system"
+		exit 1
+	fi
+	# deploy gtk libs	
+	if cp -nrv "$GTK_PATH" "$LIB_DIR" && cp -nrv "$GDK_PATH" "$LIB_DIR"; then
+		echo "Found and copied GTK and Gdk libs to \"$LIB_DIR\""
+	else
+		echo "ERROR: Could not deploy GTK and Gdk to \"$LIB_DIR\"" 
+		exit 1
+	fi
+	# Find any remaining libraries needed for gtk libraries
+	for file in $(find "$LIB_DIR"/*/* -type f -regex '.*\.so.*'); do
+		[ -f "$file" ] && _get_deps "$file" "$LIB_DIR"
+	done
+	# patch the gdk loaders.cache file to remove absolute paths
+	if [ -f "$LIB_DIR"/gdk*/*/loaders.cache ]; then
+		sed -i 's|/usr/lib.*/gdk-pixbuf.*/.*/loaders/||g' \
+			"$LIB_DIR"/gdk*/*/loaders.cache
+	else
+		echo $LINE
+		echo "WARNING: No gdk loaders.cache file found"
+		echo $LINE
+	fi
+
 }
 
 _check_icon_and_desktop() {
@@ -239,20 +289,42 @@ _check_apprun() {
 		echo "$LINE"
 	elif [ "$DEPLOY_ALL" = 1 ]; then
 		cat <<-EOF
-		$LINE
+		"$LINE"
 		I detected you provided your own AppRun with DEPLOY_ALL=1
 		Note that when deploying everything a specific AppRun is needed
 		If you wish to use it, do not create it and I will download and
 		place the specific AppRun in $APPDIR
-		$LINE
+		"$LINE"
 		EOF
 	fi
 }
 
-# patch the rest of libraries and binary
-_patch_libs_and_bin_path() {
-	find $LIB_DIR -type f -exec patchelf --set-rpath '$ORIGIN' {} ';'
-	patchelf --set-rpath '$ORIGIN/../lib' "$TARGET"
+# patch libraries and binary
+_patch_libs_and_bin_rpath() {		
+	# patch qt plugins
+	if [ "$DEPLOY_QT" = 1 ]; then
+		find "$PLUGIN_DIR"/ -type f -regex '.*\.so.*' -exec \
+			patchelf --set-rpath "$QTLIBPATCH" {} ';'
+	fi
+	# patch gtk libs
+	if [ "$DEPLOY_GTK" = 1 ]; then
+		LIBPATCH="$LIBPATCH_GTK"
+		BINPATCH="$BINPATCH_GTK"	
+	fi
+	# patch rest of libraries
+	find "$LIB_DIR" -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		patchelf --set-rpath "$LIBPATCH" {} ';'
+	find "$LIB_DIR"/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		patchelf --set-rpath '$ORIGIN/../:$ORIGIN' {} ';' 2>/dev/null
+	find "$LIB_DIR"/*/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		patchelf --set-rpath '$ORIGIN/../../:$ORIGIN' {} ';' 2>/dev/null
+	find "$LIB_DIR"/*/*/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		patchelf --set-rpath '$ORIGIN/../../../:$ORIGIN' {} ';' 2>/dev/null
+	# patch binaries
+	find "$BINDIR"/* -maxdepth 1 -type f -exec \
+		patchelf --set-rpath "$BINPATCH" {} ';' 2>/dev/null
+	# make sure binaries have exec perms
+	chmod +x "$BINDIR"/*
 }
 
 # output warning for missing libs
@@ -285,7 +357,8 @@ _check_dirs_and_target
 _check_skip_and_get_denylist
 _get_deps $TARGET $LIB_DIR
 _deploy_qt
-_patch_libs_and_bin_path
+_deploy_gtk
+_patch_libs_and_bin_rpath
 _check_icon_and_desktop
 _check_apprun
 _check_not_found_libs
