@@ -32,9 +32,7 @@ FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/mast
 			/platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
 RPATHS="/lib /lib64"
-BINPATCH='$ORIGIN/../lib:$ORIGIN/../../lib64:$ORIGIN'
-LIBPATCH='$ORIGIN:$ORIGIN/../../lib64:$ORIGIN/../bin'
-QTLIBPATCH='$ORIGIN/../../lib:$ORIGIN/../../../lib64:$ORIGIN'
+
 # safety checks
 if [ -z "$1" ]; then
 	cat <<-EOF
@@ -112,13 +110,12 @@ _check_options_and_get_denylist() {
 	fi
 	if [ "$DEPLOY_QT" = 1 ]; then
 		echo 'Got it! Will be deploying Qt'
+		PLUGIN_DIR="$LIBDIR"/../plugins
 		RPATHS="$RPATHS $QT_PLUGINS"
 	fi
 	if [ "$DEPLOY_GTK" = 1 ]; then
 		echo 'Got it! Will be deploying GTK'
 		RPATHS="$RPATHS /immodules /loaders /printbackends /modules"
-		LIBPATCH="$LIBPATCH_GTK"
-		BINPATCH="$BINPATCH_GTK"
 	fi
 	# get exclude list if not deplying everything
 	if [ "$DEPLOY_ALL" = 1 ]; then
@@ -176,7 +173,6 @@ _deploy_qt() {
 	echo "$LINE"
 	echo 'Deploying Qt...'
 	echo "$LINE"
-	PLUGIN_DIR="$LIBDIR"/../plugins
 	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
 	  -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
 	# copy qt plugins
@@ -192,7 +188,8 @@ _deploy_qt() {
 	for file in $(find "$PLUGIN_DIR"/* -type f -regex '.*\.so.*'); do
 		[ -f "$file" ] && _get_deps "$file" "$LIBDIR"
 	done
-	# make qt.conf file
+	# make qt.conf file. NOTE go-appimage does not make this file
+	# while linuxdeploy does make it, not sure if needed.
 	cat <<-EOF > "$BINDIR"/qt.conf
 	[Paths]
 	Prefix = ../
@@ -211,9 +208,6 @@ _deploy_gtk() {
 		echo "Deploying GTK3..."
 		GTKVER="gtk-3.0"
 	elif echo "$needed_lib" | grep -q "libgtk-4.so"; then
-###################################################################
-		echo "GTK4 not ready" && exit 1
-###################################################################
 		echo "Deploying GTK4..."
 		GTKVER="gtk-4.0"
 	else
@@ -276,8 +270,9 @@ _check_icon_and_desktop() {
 }
 
 _check_apprun() {
+	echo "$LINE"
+	# check if there is no AppRun and get one
 	if [ ! -f "$APPDIR"/AppRun ]; then
-		echo "$LINE"
 		echo "Downloading AppRun..."
 		if wget "$APPRUN" -O "$APPDIR"/AppRun 2>/dev/null; then
 			echo "Added AppRun to \"$APPDIR\""
@@ -286,64 +281,21 @@ _check_apprun() {
 		else
 			echo "ERROR: Could not download generic AppRun, no internet?"
 		fi
-		echo "$LINE"
 	elif [ "$DEPLOY_ALL" = 1 ]; then
 		cat <<-EOF
-		"$LINE"
 		I detected you provided your own AppRun with DEPLOY_ALL=1
 		Note that when deploying everything a specific AppRun is needed
 		If you wish to use it, do not create it and I will download and
 		place the specific AppRun in $APPDIR
-		"$LINE"
 		EOF
 	fi
+	echo "$LINE"
 	# give exec perms to apprun and binaries
 	chmod +x "$APPDIR"/AppRun "$BINDIR"/*
 }
 
-# patch libraries and binary
-_patch_libs_and_bin_rpath() {
-	# TODO replace this with a dynamic lookup like it is done with the rest
-	find "$LIBDIR"/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN' {} ';' 2>/dev/null
-	find "$LIBDIR"/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN/../:$ORIGIN' {} ';' 2>/dev/null
-	find "$LIBDIR"/*/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN/../../:$ORIGIN' {} ';' 2>/dev/null
-	find "$LIBDIR"/*/*/*/* -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN/../../../:$ORIGIN' {} ';' 2>/dev/null
-
-	# add rest of lib paths to rpath
-	# first binaries
-	cd "$BINDIR" || exit 1
-	for dir in $RPATHS; do
-		module="$(find ../ -maxdepth 5 -type d \
-			-regex ".*$dir" 2>/dev/null | head -1)"
-		[ -z "$module" ] && continue
-		# add each location to rpath
-		find "$BINDIR"/* -maxdepth 1 -type f -exec \
-		  patchelf --add-rpath \$ORIGIN/"$module" {} ';' 2>/dev/null
-	done
-	# now libraries
-	cd "$LIBDIR" || exit 1
-	for dir in $RPATHS; do
-		module="$(find . ../ -maxdepth 5 -type d \
-			-regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
-		[ -z "$module" ] && continue
-		find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-		  patchelf --add-rpath \$ORIGIN"$module" {} ';' 2>/dev/null
-	done
-	# patch qt plugins
-	if [ "$DEPLOY_QT" = 1 ]; then
-		find "$PLUGIN_DIR"/ -type f -regex '.*\.so.*' -exec \
-			patchelf --set-rpath "$QTLIBPATCH" {} ';'
-	fi
-	# likely overkill
-	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' -exec \
-	  ln -s {} "$LIBDIR" ';' 2>/dev/null
-}
-
 _patch_away_absolute_paths() {
+	echo "Removing absolute paths..."
 	# remove absolute paths from the ld-linux.so (DEPLOY_ALL)
 	find "$APPDIR"/lib64 -type f -regex '.*ld-linux.*.so.*' -exec \
 	  sed -i 's|/usr|/xxx|g; s|/lib|/XXX|g; s|/etc|/EEE|g' {} ';' 2>/dev/null
@@ -355,6 +307,54 @@ _patch_away_absolute_paths() {
 	# patch the gdk loaders.cache file to remove absolute paths
 	find "$LIBDIR" -type f -regex '.*gdk.*loaders.cache' -exec \
 	  sed -i 's|/.*lib.*/gdk-pixbuf.*/.*/loaders/||g' {} ';' 2>/dev/null
+}
+
+_patch_libs_and_bin_rpath() {
+	# first add $ORIGIN as the first rpath of all libraries
+	find "$APPDIR" -type f -regex '.*\.so.*' -exec \
+	  patchelf --set-rpath '$ORIGIN' {} ';' 2>/dev/null
+	# also set the main lib dir as the first rpath in the binaries
+	find "$BINDIR" -type f -regex '.*\.so.*' -exec \
+	  patchelf --set-rpath '$ORIGIN/../lib' {} ';' 2>/dev/null
+
+	# find all directories that contain libraries and patch them
+	# to point their rpaths to each other lib directory
+	LIBDIRS="$(find "$APPDIR" -type f -regex '.*/.*.so.*' 2>/dev/null \
+	  | sed 's/\/[^/]*$//' | sort -u)"
+	for libdir in $LIBDIRS; do
+		cd "$libdir" 2>/dev/null || continue
+		echo "Patching rpath of libraries in \"$libdir\"..."
+		for dir in $RPATHS; do # TODO Find a better way to do this find lol
+			module="$(find . ../ ../../ ../../../ ../../../../ -maxdepth 5 \
+			  -type d -regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
+			check="$(realpath -e $module 2>/dev/null)"
+			case "$check" in # just in case find picks an absolute path
+				'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|\
+				'/usr/local/lib'|'/usr/local/lib64'|"$HOME/.local/lib")
+					continue
+					;;
+				'')
+					continue
+					;;
+			esac
+			# patch the lib
+			find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+				patchelf --add-rpath \$ORIGIN"$module" {} ';' 2>/dev/null
+		done
+	done
+	# add the rest of lib dirs to rpath of binaries
+	cd "$BINDIR" || exit 1
+	for dir in $RPATHS; do
+		module="$(find ../ ../../ -maxdepth 5 -type d \
+		  -regex ".*$dir" 2>/dev/null | head -1)"
+		[ -z "$module" ] && continue
+		# add each location to rpath
+		find "$BINDIR"/* -maxdepth 1 -type f -exec \
+		  patchelf --add-rpath \$ORIGIN/"$module" {} ';' 2>/dev/null
+	done
+	# likely overkill
+	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' -exec \
+	  ln -s {} "$LIBDIR" ';' 2>/dev/null
 }
 
 _strip_and_check_not_found_libs() {
@@ -402,6 +402,6 @@ _deploy_qt
 _deploy_gtk
 _check_icon_and_desktop
 _check_apprun
-_patch_libs_and_bin_rpath
 _patch_away_absolute_paths
+_patch_libs_and_bin_rpath
 _strip_and_check_not_found_libs
