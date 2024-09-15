@@ -31,6 +31,7 @@ FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/mast
 			/platformthemes /mediaservice /platforms /iconengines \
 			/platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
+RPATHS="/lib /lib64"
 
 # safety checks
 if [ -z "$1" ]; then
