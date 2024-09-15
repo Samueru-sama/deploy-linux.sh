@@ -99,8 +99,8 @@ _check_dirs_and_target() {
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
 		for path in $(printf $PATH | tr ':' ' '); do
-			TRY_PATH="$(realpath -e "$path/../$libpath" 2>/dev/null)"
-			[ -n "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
+			TRY_PATH="$(realpath "$path/../$libpath" 2>/dev/null)"
+			[ -d "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
 		done
 	done
 	TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
@@ -173,8 +173,6 @@ _get_deps() {
 			continue
 		fi
 		# find the path to the lib and check it exists
-#		foundlib="$(readlink -e $(find $LIB_PATHS -regex \
-#		  ".*$(echo $lib | tr '+' '.')" -print -quit))"
 		foundlib="$(find $LIB_PATHS -regex ".*$(echo $lib | tr '+' '.')" \
 		  -print -quit 2>/dev/null)"
 		if [ -z "$foundlib" ]; then
@@ -271,10 +269,10 @@ _check_icon_and_desktop() {
 	if [ ! -f ./*.desktop ]; then
 		echo "$LINE"
 		echo "Trying to find .desktop for \"$TARGET\""...
-		DESKTOP=$(find ./ /usr/share /usr/local -type f -iregex \
-		  ".*/applications/$NAME.desktop" 2>/dev/null | head -1)
-		DESKTOP2=$(find ./ /usr/share /usr/local -type f -iregex \
-		  ".*/applications/.*$NAME.*.desktop" 2>/dev/null | head -1)
+		DESKTOP_ALL="$(find ./ /usr/*/applications /usr/*/*/applications \
+		  -type f -regex '.*.desktop' 2>/dev/null)"
+		DESKTOP="$(echo "$DESKTOP_ALL" | grep /"$NAME".desktop | head -1)"
+		DESKTOP2="$(echo "$DESKTOP_ALL" | grep -i "$NAME" | head -1)"
 		DESKTOP="${DESKTOP:-$DESKTOP2}"
 		if cp -n "$DESKTOP" ./"$NAME".desktop 2>/dev/null; then
 			echo "Found .desktop and added it to \"$APPDIR\""
@@ -357,14 +355,14 @@ _patch_libs_and_bin_rpath() {
 		for dir in $RPATHS; do # TODO Find a better way to do this find lol
 			module="$(find ./ ../ ../../ ../../../ ../../../../ -maxdepth 5 \
 			  -type d -regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
-			check="$(realpath -e $module 2>/dev/null)"
+			check="$(realpath $module 2>/dev/null)"
 			case "$check" in # just in case find picks an absolute path
-				'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|"$libdir"|\
+				''|'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|"$libdir"|\
 				'/usr/local/lib'|'/usr/local/lib64'|"$HOME/.local/lib")
 					continue
 					;;
-				'')
-					continue
+				*)
+					[ ! -d "$check" ] && continue
 					;;
 			esac
 			# store path in a variable
