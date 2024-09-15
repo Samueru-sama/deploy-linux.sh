@@ -32,6 +32,17 @@ FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/mast
 			/platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
 RPATHS="/lib /lib64"
+BACKUP_EXCLUDES="ld-linux.so.2 ld-linux-x86-64.so.2 libanl.so.1 libgmp.so.10 \
+libBrokenLocale.so.1 libcidn.so.1 libc.so.6 libdl.so.2 libm.so.6 libmvec.so.1 \
+libnss_compat.so.2 libnss_dns.so.2 libnss_files.so.2 libnss_hesiod.so.2 \
+libnss_nisplus.so.2 libnss_nis.so.2 libpthread.so.0 libresolv.so.2 librt.so.1 \
+libthread_db.so.1 libutil.so.1 libstdc++.so.6 libGL.so.1 libEGL.so.1 \
+libGLdispatch.so.0 libGLX.so.0 libOpenGL.so.0 libdrm.so.2 libglapi.so.0 \
+libgbm.so.1 libxcb.so.1 libX11.so.6 libX11-xcb.so.1 libasound.so.2 \
+libfontconfig.so.1 libfreetype.so.6 libharfbuzz.so.0 libcom_err.so.2 \
+libexpat.so.1 libgcc_s.so.1 libgpg-error.so.0 libICE.so.6 libSM.so.6 \
+libusb-1.0.so.0 libuuid.so.1 libz.so.1 libgpg-error.so.0 libjack.so.0 \
+libpipewire-0.3.so.0 libxcb-dri3.so.0 libxcb-dri2.so.0 libfribidi.so.0"
 
 # safety checks
 if [ -z "$1" ]; then
@@ -48,17 +59,21 @@ elif ! command -v find 1>/dev/null; then
 elif ! command -v patchelf 1>/dev/null; then
 	echo "ERROR: Missing patchelf dependency!"
 	exit 1
-elif ! command -v wget 1>/dev/null; then
-	echo "ERROR: Missing wget dependency!"
-	exit 1
 elif [ -z "$TARGET" ]; then
 	echo "ERROR: \"$1\" is not a valid argument or wasn't found"
 	exit 1
 elif ! command -v strip 1>/dev/null; then
-	echo "ERROR: Missing strip dependency! It is advised that you install strip"
+	echo "ERROR: Missing strip dependency! It is advised to install strip"
 	echo "This script can work without it, so we are continuing..."
 	NO_STRIP=true
-	sleep 2
+	sleep 3
+fi
+if ! command -v wget 1>/dev/null; then
+	echo "ERROR: Missing wget dependency! I will continue without wget"
+	echo "but be aware I won't be able to get an AppRun scipt, I will"
+	echo "also be using an internal exclude list, which may be outdated"
+	echo "Please install wget"
+	sleep 3
 fi
 
 # checks target binary, creates appdir if needed and check systems dirs
@@ -102,12 +117,6 @@ _check_dirs_and_target() {
 
 _check_options_and_get_denylist() {
 	echo "$LINE"
-	# add extra libs to the excludelist
-	if [ -n "$SKIP" ]; then
-		SKIP=$(echo "$SKIP" | tr ' ' '\n')
-		echo 'Got it! Ignoring the following libraries:'
-		EXCLUDES=$(printf '%s\n%s' "$EXCLUDES" "$SKIP")
-	fi
 	if [ "$DEPLOY_QT" = 1 ]; then
 		echo 'Got it! Will be deploying Qt'
 		PLUGIN_DIR="$LIBDIR"/../plugins
@@ -121,13 +130,25 @@ _check_options_and_get_denylist() {
 	if [ "$DEPLOY_ALL" = 1 ]; then
 		echo 'Got it! Ignoring exclude list and deploy all libs'
 	else
-		EXCLUDES="$(wget "$FORBIDDEN" -O - 2>/dev/null | sed 's/#.*//; /^$/d')"
+		EXCLUDES="$(wget --tries=20 "$FORBIDDEN" -O - 2>/dev/null)"
 		if [ -z "$EXCLUDES" ]; then
-			echo "ERROR: Could not download the exclude list, no internet?"
-			exit 1
+			cat <<-EOF
+			ERROR: Could not download the exclude list, no internet?
+			We will be using a backup list in "$0", but be aware
+			that it may be outdated and it is best to fix the internet issue
+			EOF
+			EXCLUDES="$(echo "$BACKUP_EXCLUDES" | tr ' ' '\n')"
+			sleep 2
 		fi
 	fi
-	echo "$LINE"
+	# filter only the libs from the exclude list
+	EXCLUDES="$(echo "$EXCLUDES" | sed 's/#.*//; /^$/d')"
+	# add extra libs to the excludelist
+	if [ -n "$SKIP" ]; then
+		SKIP="$(echo "$SKIP" | tr ' ' '\n')"
+		echo 'Got it! Ignoring the following libraries:'
+		EXCLUDES="$(printf '%s\n%s' "$EXCLUDES" "$SKIP")"
+	fi
 }
 
 # main function, gets and copies the needed libraries
@@ -138,13 +159,13 @@ _get_deps() {
 		# check lib is not in the exclude list or is not already deployed
 		if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
 			if ! echo $skippedlib | grep -q "$lib"; then
-				echo "$lib is on the exclude list... skipping"
+				echo "$lib is on the exclude list, skipping..."
 			fi
 			skippedlib="$skippedlib $lib" # avoid repeating message
 			continue
 		elif [ -f "$DESTDIR"/"$lib" ] || [ -f "$APPDIR"/lib64/"$lib" ]; then
 			if ! echo $deployedlib | grep -q "$lib"; then
-				echo "$lib is already deployed... skipping"
+				echo "$lib is already deployed, skipping..."
 			fi
 			deployedlib="$deployedlib $lib" # avoid repeating message
 			continue
@@ -239,14 +260,17 @@ _deploy_gtk() {
 }
 
 _check_icon_and_desktop() {
+	cd "$APPDIR" || exit 1
 	# find and copy .desktop
 	NAME="$(echo "$TARGET" | awk -F"/" '{print $NF}')"
-	if [ ! -f "$APPDIR"/*.desktop ]; then
+	if [ ! -f ./*.desktop ]; then
 		echo "$LINE"
 		echo "Trying to find .desktop for \"$TARGET\""...
-		DESKTOP=$(find "$APPDIR" "$HOME" /usr/share /opt -type f -iregex \
-		  ".*/applications/.*$NAME.*\.desktop" 2>/dev/null | head -1)
-		if [ -n "$DESKTOP" ] && cp "$DESKTOP" "$APPDIR"/"$NAME".desktop; then
+		DESKTOP=$(find ./ /usr/share /usr/local -type f -iregex \
+		  ".*/applications/$NAME.desktop" 2>/dev/null | head -1)
+		DESKTOP2=$(find ./ /usr/share /usr/local -type f -iregex \
+		  ".*/applications/.*$NAME.*.desktop" 2>/dev/null | head -1)
+		if cp -n "${DESKTOP:-$DESKTOP2}" ./"$NAME".desktop 2>/dev/null; then
 			echo "Found .desktop and added it to \"$APPDIR\""
 		else
 			echo "ERROR: Could not find .desktop for \"$TARGET\""
@@ -254,19 +278,31 @@ _check_icon_and_desktop() {
 		echo "$LINE"
 	fi
 	# find and copy icon
-	if [ ! -f "$APPDIR"/.DirIcon ]; then
+	if [ ! -f ./.DirIcon ]; then
+		# first try to find an icon in the AppDir
 		echo "$LINE"
 		echo "Trying to find icon for \"$TARGET\""...
-		ICON=$(find "$APPDIR" "$HOME" /usr/share /opt -type f -iregex \
-		  ".*/icons/.*$NAME.*\.\(png\|svg\)" 2>/dev/null | head -1)
-		if [ -n "$ICON" ] && cp "$ICON" "$APPDIR"/"$NAME"; then
-			ln -s "$APPDIR"/"$NAME" "$APPDIR/.DirIcon"
-			echo "Found icon and added it to \"$APPDIR\""
-		else
-			echo "ERROR: Could not find icon for \"$TARGET\""
+		ICON_NAME="$(grep "Icon=" ./*.desktop 2>/dev/null \
+		  | awk -F"=" '{print $NF}')"
+		if [ -n "$ICON_NAME" ]; then
+			find ./ -type f -regex ".*$ICON_NAME.*\.\(png\|svg\)" -exec \
+			  ln -s {} ./.DirIcon ';' 2>/dev/null
 		fi
-		echo "$LINE"
 	fi
+	if [ ! -f ./.DirIcon ]; then
+		# now try to find it on the system
+		ICON="$(find /usr/share /usr/local -type f -iregex \
+		  ".*/${ICON_NAME:-$NAME}.*\.\(png\|svg\)" 2>/dev/null | head -1)"
+		cp -n "$ICON" ./${ICON_NAME:-$NAME} 2>/dev/null
+	fi
+	# make sure what we got is an image
+	if file ./${ICON_NAME:-$NAME} 2>/dev/null | grep -qi image; then
+		ln -s ./"${ICON_NAME:-$NAME}" "./.DirIcon"
+		echo "Found icon and added it to \"$APPDIR\""
+	else
+		echo "ERROR: Could not find icon for \"$TARGET\""
+	fi
+	echo "$LINE"
 }
 
 _check_apprun() {
@@ -274,7 +310,7 @@ _check_apprun() {
 	# check if there is no AppRun and get one
 	if [ ! -f "$APPDIR"/AppRun ]; then
 		echo "Downloading AppRun..."
-		if wget "$APPRUN" -O "$APPDIR"/AppRun 2>/dev/null; then
+		if wget --tries=20 "$APPRUN" -O "$APPDIR"/AppRun 2>/dev/null; then
 			echo "Added AppRun to \"$APPDIR\""
 			echo "AppRun source: \"$APPRUN\""
 			echo "Note that this AppRun may need some fixes to work"
@@ -318,7 +354,7 @@ _patch_libs_and_bin_rpath() {
 		cd "$libdir" 2>/dev/null || continue
 		echo "Patching rpath of libraries in \"$libdir\"..."
 		for dir in $RPATHS; do # TODO Find a better way to do this find lol
-			module="$(find . ../ ../../ ../../../ ../../../../ -maxdepth 5 \
+			module="$(find ./ ../ ../../ ../../../ ../../../../ -maxdepth 5 \
 			  -type d -regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
 			check="$(realpath -e $module 2>/dev/null)"
 			case "$check" in # just in case find picks an absolute path
@@ -333,7 +369,7 @@ _patch_libs_and_bin_rpath() {
 			# store path in a variable
 			patch="$patch:\$ORIGIN/"$module""
 		done
-		find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		find ./ -maxdepth 1 -type f -regex '.*\.so.*' -exec \
 		  patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
 		patch=""
 	done
