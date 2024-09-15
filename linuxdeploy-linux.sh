@@ -13,9 +13,7 @@
 #  defaults: lib64 lib
 # "$SKIP" names of the libraries you wish to skip, each enty space separated
 # "$DEPLOY_QT" when set to 1 it enables the deploying of Qt plugins
-# "$QT_PLUGINS" names of the Qt plugins to deploy
-# defaults: audio bearer imageformats mediaservice platforminputcontexts
-#		   platformthemes xcbglintegrations iconengines
+# "$QT_PLUGINS" names of Qt plugins to deploy, defaults to several plugins
 
 [ "$DEBUG" = 1 ] && set -x
 # set vars
@@ -62,6 +60,9 @@ elif ! command -v patchelf 1>/dev/null; then
 elif [ -z "$TARGET" ]; then
 	echo "ERROR: \"$1\" is not a valid argument or wasn't found"
 	exit 1
+elif ! command -v realpath 1>/dev/null; then
+	echo "ERROR: realpath dependency!"
+	exit 1
 elif ! command -v strip 1>/dev/null; then
 	echo "ERROR: Missing strip dependency! It is advised to install strip"
 	echo "This script can work without it, so we are continuing..."
@@ -89,8 +90,8 @@ _check_dirs_and_target() {
 		[ -z "$TARGET" ] && exit 1
 	else
 		BINDIR="$(dirname $TARGET)"
-		APPDIR="$(readlink -m $BINDIR/../../)"
-		LIBDIR="$(readlink -m $BINDIR/../lib)"
+		APPDIR="$(realpath $BINDIR/../../)"
+		LIBDIR="$(realpath $BINDIR/../lib)"
 		mkdir -p "$BINDIR" "$LIBDIR" || exit 1
 	fi
 	[ ! -w "$APPDIR" ] && echo "ERROR: Cannot write to \"$APPDIR\"" && exit 1
@@ -98,7 +99,7 @@ _check_dirs_and_target() {
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
 		for path in $(printf $PATH | tr ':' ' '); do
-			TRY_PATH="$(readlink -e "$path/../$libpath" 2>/dev/null)"
+			TRY_PATH="$(realpath -e "$path/../$libpath" 2>/dev/null)"
 			[ -n "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
 		done
 	done
@@ -134,8 +135,8 @@ _check_options_and_get_denylist() {
 		if [ -z "$EXCLUDES" ]; then
 			cat <<-EOF
 			ERROR: Could not download the exclude list, no internet?
-			We will be using a backup list in "$0", but be aware
-			that it may be outdated and it is best to fix the internet issue
+			We will be using a backup list in "$0", but be aware that
+			it may be outdated and it is best to fix the internet issue
 			EOF
 			EXCLUDES="$(echo "$BACKUP_EXCLUDES" | tr ' ' '\n')"
 			sleep 2
@@ -149,6 +150,7 @@ _check_options_and_get_denylist() {
 		echo 'Got it! Ignoring the following libraries:'
 		EXCLUDES="$(printf '%s\n%s' "$EXCLUDES" "$SKIP")"
 	fi
+	echo "$LINE"
 }
 
 # main function, gets and copies the needed libraries
@@ -171,8 +173,10 @@ _get_deps() {
 			continue
 		fi
 		# find the path to the lib and check it exists
-		foundlib="$(readlink -e $(find $LIB_PATHS -regex \
-		  ".*$(echo $lib | tr '+' '.')" -print -quit))"
+#		foundlib="$(readlink -e $(find $LIB_PATHS -regex \
+#		  ".*$(echo $lib | tr '+' '.')" -print -quit))"
+		foundlib="$(find $LIB_PATHS -regex ".*$(echo $lib | tr '+' '.')" \
+		  -print -quit 2>/dev/null)"
 		if [ -z "$foundlib" ]; then
 			printf '\n%s\n\n' "ERROR: could not find \"$lib\""
 			NOT_FOUND="$NOT_FOUND:$lib"
@@ -184,6 +188,7 @@ _get_deps() {
 		else
 			cp -v "$foundlib" $DESTDIR/$lib &
 		fi
+		# now find deps of found lib
 		_get_deps "$foundlib" "$DESTDIR"
 		TOTAL_LIBS=$(( $TOTAL_LIBS + 1 ))
 	done
@@ -242,7 +247,7 @@ _deploy_gtk() {
 	GDK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
 	  -regex ".*/gdk-pixbuf-.*" 2>/dev/null | head -1)")"
 	if [ -z "$GTK_PATH" ] || [ -z "$GDK_PATH" ]; then
-		echo "ERROR: Could not find all gtk and/or gdk-pixbuf libs on system"
+		echo "ERROR: Could not find all GTK/gdk-pixbuf libs on system"
 		exit 1
 	fi
 	# deploy gtk libs
@@ -270,7 +275,8 @@ _check_icon_and_desktop() {
 		  ".*/applications/$NAME.desktop" 2>/dev/null | head -1)
 		DESKTOP2=$(find ./ /usr/share /usr/local -type f -iregex \
 		  ".*/applications/.*$NAME.*.desktop" 2>/dev/null | head -1)
-		if cp -n "${DESKTOP:-$DESKTOP2}" ./"$NAME".desktop 2>/dev/null; then
+		DESKTOP="${DESKTOP:-$DESKTOP2}"
+		if cp -n "$DESKTOP" ./"$NAME".desktop 2>/dev/null; then
 			echo "Found .desktop and added it to \"$APPDIR\""
 		else
 			echo "ERROR: Could not find .desktop for \"$TARGET\""
@@ -282,25 +288,20 @@ _check_icon_and_desktop() {
 		# first try to find an icon in the AppDir
 		echo "$LINE"
 		echo "Trying to find icon for \"$TARGET\""...
-		ICON_NAME="$(grep "Icon=" ./*.desktop 2>/dev/null \
-		  | awk -F"=" '{print $NF}')"
-		if [ -n "$ICON_NAME" ]; then
-			find ./ -type f -regex ".*$ICON_NAME.*\.\(png\|svg\)" -exec \
-			  ln -s {} ./.DirIcon ';' 2>/dev/null
-		fi
-	fi
-	if [ ! -f ./.DirIcon ]; then
+		ICON_NAME="$(awk -F"=" '/Icon/ {print $2}' ./*.desktop 2>/dev/null)"
+		ICON_NAME="${ICON_NAME:-$NAME}"
+		find ./ -type f -regex ".*$ICON_NAME.*\.\(png\|svg\)" \
+		  -exec cp -n {} ./.DirIcon ';' 2>/dev/null
 		# now try to find it on the system
-		ICON="$(find /usr/share /usr/local -type f -iregex \
-		  ".*/${ICON_NAME:-$NAME}.*\.\(png\|svg\)" 2>/dev/null | head -1)"
-		cp -n "$ICON" ./${ICON_NAME:-$NAME} 2>/dev/null
-	fi
-	# make sure what we got is an image
-	if file ./${ICON_NAME:-$NAME} 2>/dev/null | grep -qi image; then
-		ln -s ./"${ICON_NAME:-$NAME}" "./.DirIcon"
-		echo "Found icon and added it to \"$APPDIR\""
-	else
-		echo "ERROR: Could not find icon for \"$TARGET\""
+		[ ! -f ./DirIcon ] && find /usr/share /usr/local -type f \
+		  -regex ".*$ICON_NAME.*\.\(png\|svg\)" \
+		  -exec cp -n {} ./.DirIcon ';' 2>/dev/null
+		# make sure what we got is an image
+		if file ./.DirIcon 2>/dev/null | grep -qi image; then
+			echo "Found icon and added it to \"$APPDIR\""
+		else
+			echo "ERROR: Could not find icon for \"$TARGET\""
+		fi
 	fi
 	echo "$LINE"
 }
@@ -369,8 +370,8 @@ _patch_libs_and_bin_rpath() {
 			# store path in a variable
 			patch="$patch:\$ORIGIN/"$module""
 		done
-		find ./ -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-		  patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
+		find ./ -maxdepth 1 -type f -regex '.*\.so.*' ! -name 'ld-*.so.*' \
+		  -exec patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
 		patch=""
 	done
 	# add the rest of lib dirs to rpath of binaries
@@ -427,9 +428,6 @@ _strip_and_check_not_found_libs() {
 	echo "$LINE"
 }
 
-#######################################
-# TODO AVOID PATCHING LD-LINUX
-#######################################
 # do the thing
 _check_dirs_and_target
 _check_options_and_get_denylist
