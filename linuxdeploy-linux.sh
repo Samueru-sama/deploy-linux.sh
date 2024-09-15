@@ -331,7 +331,7 @@ _patch_libs_and_bin_rpath() {
 					;;
 			esac
 			# store path in a variable
-			patch="$patch:\$ORIGIN"$module""
+			patch="$patch:\$ORIGIN/"$module""
 		done
 		find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
 		  patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
@@ -344,7 +344,7 @@ _patch_libs_and_bin_rpath() {
 		  -regex ".*$dir" 2>/dev/null | head -1)"
 		[ -z "$module" ] && continue
 		# store path in a variable
-		patch="$patch:\$ORIGIN"$module""
+		patch="$patch:\$ORIGIN/"$module""
 	done
 	find "$BINDIR"/* -maxdepth 1 -type f -exec \
 	  patchelf --add-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
