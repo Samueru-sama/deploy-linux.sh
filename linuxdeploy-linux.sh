@@ -16,7 +16,7 @@
 # "$QT_PLUGINS" names of the Qt plugins to deploy
 # defaults: audio bearer imageformats mediaservice platforminputcontexts
 #		   platformthemes xcbglintegrations iconengines
-#
+
 [ "$DEBUG" = 1 ] && set -x
 # set vars
 NOT_FOUND=""
@@ -31,7 +31,6 @@ FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/mast
 			/platformthemes /mediaservice /platforms /iconengines \
 			/platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
-RPATHS="/lib /lib64"
 
 # safety checks
 if [ -z "$1" ]; then
@@ -310,13 +309,6 @@ _patch_away_absolute_paths() {
 }
 
 _patch_libs_and_bin_rpath() {
-	# first add $ORIGIN as the first rpath of all libraries
-	find "$APPDIR" -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN' {} ';' 2>/dev/null
-	# also set the main lib dir as the first rpath in the binaries
-	find "$BINDIR" -type f -regex '.*\.so.*' -exec \
-	  patchelf --set-rpath '$ORIGIN/../lib' {} ';' 2>/dev/null
-
 	# find all directories that contain libraries and patch them
 	# to point their rpaths to each other lib directory
 	LIBDIRS="$(find "$APPDIR" -type f -regex '.*/.*.so.*' 2>/dev/null \
@@ -329,7 +321,7 @@ _patch_libs_and_bin_rpath() {
 			  -type d -regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
 			check="$(realpath -e $module 2>/dev/null)"
 			case "$check" in # just in case find picks an absolute path
-				'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|\
+				'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|"$libdir"|\
 				'/usr/local/lib'|'/usr/local/lib64'|"$HOME/.local/lib")
 					continue
 					;;
@@ -337,10 +329,12 @@ _patch_libs_and_bin_rpath() {
 					continue
 					;;
 			esac
-			# patch the lib
-			find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
-				patchelf --add-rpath \$ORIGIN"$module" {} ';' 2>/dev/null
+			# store path in a variable
+			patch="$patch:\$ORIGIN"$module""
 		done
+		find . -maxdepth 1 -type f -regex '.*\.so.*' -exec \
+		  patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
+		patch=""
 	done
 	# add the rest of lib dirs to rpath of binaries
 	cd "$BINDIR" || exit 1
@@ -348,10 +342,12 @@ _patch_libs_and_bin_rpath() {
 		module="$(find ../ ../../ -maxdepth 5 -type d \
 		  -regex ".*$dir" 2>/dev/null | head -1)"
 		[ -z "$module" ] && continue
-		# add each location to rpath
-		find "$BINDIR"/* -maxdepth 1 -type f -exec \
-		  patchelf --add-rpath \$ORIGIN/"$module" {} ';' 2>/dev/null
+		# store path in a variable
+		patch="$patch:\$ORIGIN"$module""
 	done
+	find "$BINDIR"/* -maxdepth 1 -type f -exec \
+	  patchelf --add-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
+	patch=""
 	# likely overkill
 	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' -exec \
 	  ln -s {} "$LIBDIR" ';' 2>/dev/null
@@ -394,6 +390,9 @@ _strip_and_check_not_found_libs() {
 	echo "$LINE"
 }
 
+#######################################
+# TODO AVOID PATCHING LD-LINUX
+#######################################
 # do the thing
 _check_dirs_and_target
 _check_options_and_get_denylist
