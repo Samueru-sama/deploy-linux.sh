@@ -26,10 +26,11 @@ APPRUN="https://raw.githubusercontent.com/Samueru-sama/deploy/main/AppRun"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 [ -z "$LIB_DIRS" ] && LIB_DIRS="lib64 lib"
 [ -z "$QT_PLUGINS" ] && QT_PLUGINS="/bearer /generic /imageformats /styles \
-			/platformthemes /mediaservice /platforms /iconengines \
-			/platforminputcontexts /xcbglintegrations"
+  /platformthemes /platforms /iconengines /wayland-decoration-client \
+  /wayland-graphics-integration-client /wayland-shell-integration \
+  /platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
-RPATHS="/lib /lib64"
+RPATHS="/lib /lib64 /gconv"
 BACKUP_EXCLUDES="ld-linux.so.2 ld-linux-x86-64.so.2 libanl.so.1 libgmp.so.10 \
 libBrokenLocale.so.1 libcidn.so.1 libc.so.6 libdl.so.2 libm.so.6 libmvec.so.1 \
 libnss_compat.so.2 libnss_dns.so.2 libnss_files.so.2 libnss_hesiod.so.2 \
@@ -61,7 +62,7 @@ elif [ -z "$TARGET" ]; then
 	echo "ERROR: \"$1\" is not a valid argument or wasn't found"
 	exit 1
 elif ! command -v realpath 1>/dev/null; then
-	echo "ERROR: realpath dependency!"
+	echo "ERROR: Missing realpath dependency!"
 	exit 1
 elif ! command -v strip 1>/dev/null; then
 	echo "ERROR: Missing strip dependency! It is advised to install strip"
@@ -70,10 +71,11 @@ elif ! command -v strip 1>/dev/null; then
 	sleep 3
 fi
 if ! command -v wget 1>/dev/null; then
-	echo "ERROR: Missing wget dependency! I will continue without wget"
-	echo "but be aware I won't be able to get an AppRun scipt, I will"
-	echo "also be using an internal exclude list, which may be outdated"
-	echo "Please install wget"
+	cat <<-EOF
+	ERROR: Missing wget dependency! I will continue without wget but
+	I will not be able to get an AppRun script, I will also be using
+	an internal exclude list which may be outdated, please install wget
+	EOF
 	sleep 3
 fi
 
@@ -84,6 +86,7 @@ _check_dirs_and_target() {
 		APPDIR="$(realpath "$APPDIR")"
 		BINDIR="$APPDIR/usr/bin"
 		LIBDIR="$APPDIR/usr/lib"
+		LIBDIR64="$APPDIR/usr/lib64"
 		mkdir -p "$BINDIR" "$LIBDIR" || exit 1
 		cp "$TARGET" "$BINDIR" || exit 1
 		TARGET="$(command -v "$BINDIR"/* 2>/dev/null)"
@@ -92,10 +95,11 @@ _check_dirs_and_target() {
 		BINDIR="$(dirname $TARGET)"
 		APPDIR="$(realpath $BINDIR/../../)"
 		LIBDIR="$(realpath $BINDIR/../lib)"
+		LIBDIR64="$(realpath $BINDIR/../lib64)"
 		mkdir -p "$BINDIR" "$LIBDIR" || exit 1
 	fi
 	[ ! -w "$APPDIR" ] && echo "ERROR: Cannot write to \"$APPDIR\"" && exit 1
-	[ "$DEPLOY_ALL" = 1 ] && mkdir -p "$APPDIR"/lib64
+	[ "$DEPLOY_ALL" = 1 ] && mkdir -p "$LIBDIR64"
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
 		for path in $(printf $PATH | tr ':' ' '); do
@@ -155,9 +159,9 @@ _check_options_and_get_denylist() {
 
 # main function, gets and copies the needed libraries
 _get_deps() {
-	needed_libs=$(patchelf --print-needed "$1")
+	NEEDED_LIBS=$(patchelf --print-needed "$1")
 	DESTDIR="$2"
-	for lib in $needed_libs; do
+	for lib in $NEEDED_LIBS; do
 		# check lib is not in the exclude list or is not already deployed
 		if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
 			if ! echo $skippedlib | grep -q "$lib"; then
@@ -165,7 +169,7 @@ _get_deps() {
 			fi
 			skippedlib="$skippedlib $lib" # avoid repeating message
 			continue
-		elif [ -f "$DESTDIR"/"$lib" ] || [ -f "$APPDIR"/lib64/"$lib" ]; then
+		elif [ -f "$DESTDIR"/"$lib" ] || [ -f "$LIBDIR64"/"$lib" ]; then
 			if ! echo $deployedlib | grep -q "$lib"; then
 				echo "$lib is already deployed, skipping..."
 			fi
@@ -181,10 +185,10 @@ _get_deps() {
 			continue
 		fi
 		# copy libs and their dependencies to the appdir
-		if echo "$foundlib" | grep -qi "ld-linux.*.so"; then
-			cp -v "$foundlib" "$APPDIR"/lib64 &
+		if echo "$foundlib" | grep -qi "ld-.*.so"; then
+			cp -v "$foundlib" "$LIBDIR64"/"$lib" &
 		else
-			cp -v "$foundlib" $DESTDIR/$lib &
+			cp -v "$foundlib" "$DESTDIR"/"$lib" &
 		fi
 		# now find deps of found lib
 		_get_deps "$foundlib" "$DESTDIR"
@@ -192,17 +196,62 @@ _get_deps() {
 	done
 }
 
+# adds gconv or ld-musl if needed
+_deploy_all_check() {
+	[ "$DEPLOY_ALL" != 1 ] && return 1
+	if [ -f "$LIBDIR"/libc.so* ]; then
+		GCONV="$(find $LIB_PATHS -type d \
+		  -regex '.*/gconv' -print -quit 2>/dev/null)"
+		if [ -z "$GCONV" ]; then
+			echo "$LINE"
+			echo "ERROR: Could not find gconv modules needed by libc"
+			echo "$LINE"
+			exit 1
+		fi
+		mkdir -p "$LIBDIR"/gconv || exit 1
+		cp -rnv "$GCONV"/*.so "$LIBDIR"/gconv
+		# count gconv libs
+		extra_libs="$(find "$PLGUN_DIR" -type f \
+		-regex '.*\.so.*' 2>/dev/null | wc -l)"
+		TOTAL_LIBS=$(( $TOTAL_LIBS + $extra_libs ))
+	elif [ -f "$LIBDIR"/libc.musl*.so* ]; then
+		LDMUSL="$(find $LIB_PATHS -type f \
+		  -regex '.*ld-musl.*' -print -quit 2>/dev/null)"
+		if [ -z "$LDMUSL" ]; then
+			echo "$LINE"
+			echo "ERROR: Could not find ld-musl.so"
+			echo "$LINE"
+			exit 1
+		fi
+		cp -rnv "$LDMUSL" "$LIBDIR64" && TOTAL_LIBS=$(( $TOTAL_LIBS + 1 ))
+	fi
+}
+
 _deploy_qt() {
 	[ "$DEPLOY_QT" != 1 ] && return 0
 	echo "$LINE"
-	echo 'Deploying Qt...'
+	checkqt="$(patchelf --print-needed "$TARGET" | tr ' ' '\n')"
+	if echo "$checkqt" | grep -q "libQt5Core"; then
+		echo "Deploying Qt5..."
+		QTVER="Qt5"
+	elif echo "$checkqt" | grep -q "libQt6Core"; then
+		echo "Deploying Qt6..."
+		QTVER="Qt6"
+	else
+		echo "ERROR: This application has no Qt dependency!"
+		return 1
+	fi
 	echo "$LINE"
 	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex '.*/plugins/platforms' 2>/dev/null | head -1)"/../)"
+	  -regex '.*/plugins/platforms' -print -quit 2>/dev/null)"/../)"
 	# copy qt plugins
 	for plugin in $QT_PLUGINS; do
-		mkdir -p "$PLUGIN_DIR"/$plugin
-		cp -rnv "$QT_PLUGIN_PATH"/$plugin/*.so "$PLUGIN_DIR"/$plugin
+		mkdir -p "$PLUGIN_DIR"/"$plugin" || continue
+		if [ -d "$QT_PLUGIN_PATH"/"$plugin" ]; then
+			cp -rnv "$QT_PLUGIN_PATH"/"$plugin" "$PLUGIN_DIR"
+		else
+			echo "ERROR: Could not find \"$plugin\" on system"
+		fi
 	done
 	if [ ! -f "$PLUGIN_DIR"/platforms/libqxcb.so ]; then
 		echo "ERROR: Could not deploy libqxcb.so plugin"
@@ -210,10 +259,10 @@ _deploy_qt() {
 	fi
 	# Find any remaining libraries needed for Qt libraries
 	for file in $(find "$PLUGIN_DIR"/* -type f -regex '.*\.so.*'); do
-		[ -f "$file" ] && _get_deps "$file" "$LIBDIR"
+		_get_deps "$file" "$LIBDIR"
 	done
 	# make qt.conf file. NOTE go-appimage does not make this file
-	# while linuxdeploy does make it, not sure if needed.
+	# while linuxdeploy does make it, not sure if needed?
 	cat <<-EOF > "$BINDIR"/qt.conf
 	[Paths]
 	Prefix = ../
@@ -221,6 +270,10 @@ _deploy_qt() {
 	Imports = qml
 	Qml2Imports = qml
 	EOF
+	# count Qt libs
+	extra_libs="$(find "$PLUGIN_DIR" -type f \
+	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
+	TOTAL_LIBS=$(( $TOTAL_LIBS + $extra_libs ))
 }
 
 _deploy_gtk() {
@@ -235,15 +288,15 @@ _deploy_gtk() {
 		echo "Deploying GTK4..."
 		GTKVER="gtk-4.0"
 	else
-		echo "ERROR: This application has no gtk dependency!"
+		echo "ERROR: This application has no GTK dependency!"
 		return 1
 	fi
 	echo "$LINE"
 	# find path to the gtk and gdk dirs (gdk needed by gtk)
 	GTK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex ".*/$GTKVER" 2>/dev/null | head -1)")"
+	  -regex ".*/$GTKVER" -print -quit 2>/dev/null)")"
 	GDK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex ".*/gdk-pixbuf-.*" 2>/dev/null | head -1)")"
+	  -regex ".*/gdk-pixbuf-.*" -print -quit 2>/dev/null)")"
 	if [ -z "$GTK_PATH" ] || [ -z "$GDK_PATH" ]; then
 		echo "ERROR: Could not find all GTK/gdk-pixbuf libs on system"
 		exit 1
@@ -259,7 +312,10 @@ _deploy_gtk() {
 	for file in $(find "$LIBDIR"/*/* -type f -regex '.*\.so.*'); do
 		[ -f "$file" ] && _get_deps "$file" "$LIBDIR"
 	done
-
+	# count gtk libs
+	extra_libs="$(find "$LIBDIR"/gtk*/* "$LIBDIR"/gdk*/* -type f \
+	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
+	TOTAL_LIBS=$(( $TOTAL_LIBS + $extra_libs ))
 }
 
 _check_icon_and_desktop() {
@@ -332,7 +388,7 @@ _check_apprun() {
 _patch_away_absolute_paths() {
 	echo "Removing absolute paths..."
 	# remove absolute paths from the ld-linux.so (DEPLOY_ALL)
-	find "$APPDIR"/lib64 -type f -regex '.*ld-linux.*.so.*' -exec \
+	find "$LIBDIR64" -type f -regex '.*ld-linux.*.so.*' -exec \
 	  sed -i 's|/usr|/xxx|g; s|/lib|/XXX|g; s|/etc|/EEE|g' {} ';' 2>/dev/null
 	# patch qt_prfxpath from the main Qt library
 	# NOTE go-appimage sets this '..' while others just leave it empty?
@@ -354,7 +410,7 @@ _patch_libs_and_bin_rpath() {
 		echo "Patching rpath of libraries in \"$libdir\"..."
 		for dir in $RPATHS; do # TODO Find a better way to do this find lol
 			module="$(find ./ ../ ../../ ../../../ ../../../../ -maxdepth 5 \
-			  -type d -regex ".*$dir" 2>/dev/null | head -1 | sed 's|^\./|/|')"
+			  -type d -regex ".*$dir" -print -quit 2>/dev/null)"
 			check="$(realpath $module 2>/dev/null)"
 			case "$check" in # just in case find picks an absolute path
 				''|'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|"$libdir"|\
@@ -365,6 +421,7 @@ _patch_libs_and_bin_rpath() {
 					[ ! -d "$check" ] && continue
 					;;
 			esac
+			module="${module#./}"
 			# store path in a variable
 			patch="$patch:\$ORIGIN/"$module""
 		done
@@ -376,7 +433,7 @@ _patch_libs_and_bin_rpath() {
 	cd "$BINDIR" || exit 1
 	for dir in $RPATHS; do
 		module="$(find ../ ../../ -maxdepth 5 -type d \
-		  -regex ".*$dir" 2>/dev/null | head -1)"
+		  -regex ".*$dir" -print -quit 2>/dev/null)"
 		[ -z "$module" ] && continue
 		# store path in a variable
 		patch="$patch:\$ORIGIN/"$module""
@@ -385,8 +442,8 @@ _patch_libs_and_bin_rpath() {
 	  patchelf --add-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
 	patch=""
 	# likely overkill
-	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' -exec \
-	  ln -s {} "$LIBDIR" ';' 2>/dev/null
+	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' \
+	  ! -regex '.*/gconv.*' -exec ln -s {} "$LIBDIR" ';' 2>/dev/null
 }
 
 _strip_and_check_not_found_libs() {
@@ -413,11 +470,6 @@ _strip_and_check_not_found_libs() {
 	echo "$LINE"
 	echo "All Done!"
 	if [ "$TOTAL_LIBS" -gt 0 ]; then
-		if [ "$DEPLOY_GTK" = 1 ] || [ "$DEPLOY_QT" = 1 ]; then
-			extra_libs="$(find "$LIBDIR"/gdk*/* "$LIBDIR"/gtk*/* \
-			   "$PLUGIN_DIR" -type f -regex '.*so.*' 2>/dev/null | wc -l)"
-			TOTAL_LIBS=$(( $TOTAL_LIBS + $extra_libs ))
-		fi
 		echo "Deployed $TOTAL_LIBS libraries"
 	else
 		echo "WARNING: No libraries have been deployed"
@@ -430,6 +482,7 @@ _strip_and_check_not_found_libs() {
 _check_dirs_and_target
 _check_options_and_get_denylist
 _get_deps "$TARGET" "$LIBDIR"
+_deploy_all_check
 _deploy_qt
 _deploy_gtk
 _check_icon_and_desktop
