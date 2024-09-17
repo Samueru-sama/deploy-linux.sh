@@ -61,7 +61,7 @@ APPRUN="$(cat <<-'EOF'
 	export PATH="$BIN_DIR:$PATH"
 	export XDG_DATA_DIRS="$SHARE_DIR:$XDG_DATA_DIRS"
 	if [ -n "$PY_HERE" ]; then
-	    export PYTHONHOM="$PY_HERE"
+	    export PYTHONHOME="$PY_HERE"
 	fi
 	if [ -d "$SHARE_DIR"/perl5 ] || [ -d "$LIB_DIR"/perl5 ]; then
 	    export PERLLIB="$SHARE_DIR/perl5:$LIB_DIR/perl5:$PERLLIB"
@@ -148,10 +148,10 @@ _check_dirs_and_target() {
 		TARGET="$(command -v "$BINDIR"/* 2>/dev/null)"
 		[ -z "$TARGET" ] && exit 1
 	else
-		BINDIR="$(dirname $TARGET)"
-		APPDIR="$(realpath $BINDIR/../../)"
-		LIBDIR="$(realpath $BINDIR/../lib)"
-		LIBDIR64="$(realpath $BINDIR/../lib64)"
+		BINDIR="$(dirname "$TARGET")"
+		APPDIR="$(realpath "$BINDIR"/../../)"
+		LIBDIR="$(realpath "$BINDIR"/../lib)"
+		LIBDIR64="$(realpath "$BINDIR"/../lib64)"
 		mkdir -p "$BINDIR" "$LIBDIR" || exit 1
 	fi
 	[ ! -w "$APPDIR" ] && echo "ERROR: Cannot write to \"$APPDIR\"" && exit 1
@@ -267,7 +267,7 @@ _deploy_all_check() {
 		mkdir -p "$LIBDIR"/gconv || exit 1
 		cp -rnv "$GCONV"/*.so "$LIBDIR"/gconv
 		# count gconv libs
-		extra_libs="$(find "$PLGUN_DIR" -type f \
+		extra_libs="$(find "$LIBDIR"/gconv -type f \
 		-regex '.*\.so.*' 2>/dev/null | wc -l)"
 		TOTAL_LIBS=$(( $TOTAL_LIBS + $extra_libs ))
 	elif [ -f "$LIBDIR"/libc.musl*.so* ]; then
@@ -468,14 +468,16 @@ _patch_libs_and_bin_rpath() {
 		for dir in $RPATHS; do # TODO Find a better way to do this find lol
 			module="$(_find_libdir_relative ".*$dir" -print -quit)"
 			# this avoids adding a libdir outside the AppDir to rpath
-			if echo "$module" | grep -qi "${APPDIR##*/}"; then
+			if [ -z "$module" ]; then
 				continue
-			elif [ -z "$module" ]; then
+			elif echo "$module" | grep -qi "${APPDIR##*/}"; then
+				continue
+			elif [ "${module##*/}" = "${libdir##*/}" ]; then
 				continue
 			fi
 			# remove leading "./" and store path in a variable
 			module="${module#./}"
-			patch="$patch:\$ORIGIN/"$module""
+			patch="$patch:\$ORIGIN/$module"
 		done
 		# patch the libs/binaries
 		find ./ -maxdepth 1 -type f ! -name 'ld-*.so.*' \
