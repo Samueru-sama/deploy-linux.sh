@@ -29,7 +29,7 @@ FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/mast
   /wayland-graphics-integration-client /wayland-shell-integration \
   /platforminputcontexts /xcbglintegrations"
 LINE="-----------------------------------------------------------"
-RPATHS="/lib /lib64 /gconv"
+RPATHS="/lib /lib64 /gconv /bin"
 BACKUP_EXCLUDES="ld-linux.so.2 ld-linux-x86-64.so.2 libanl.so.1 libgmp.so.10 \
 libBrokenLocale.so.1 libcidn.so.1 libc.so.6 libdl.so.2 libm.so.6 libmvec.so.1 \
 libnss_compat.so.2 libnss_dns.so.2 libnss_files.so.2 libnss_hesiod.so.2 \
@@ -81,7 +81,11 @@ APPRUN="$(cat <<-'EOF'
 	      GDK_PIXBUF_MODULE_FILE="$GDK_LOADER" \
 	      FONTCONFIG_FILE="/etc/fonts/fonts.conf" \
 	      GSETTINGS_SCHEMA_DIR="$SCHEMA_HERE:$GSETTINGS_SCHEMA_DIR"
-	    exec "$LD_LINUX" --inhibit-cache "$TARGET" "$@"
+	    if echo "$LD_LINUX" | grep -qi musl; then
+	        exec "$LD_LINUX" "$TARGET" "$@"
+	    else
+	        exec "$LD_LINUX" --inhibit-cache "$TARGET" "$@"
+	    fi
 	else
 	    exec "$TARGET" "$@"
 	fi
@@ -123,6 +127,14 @@ if ! command -v wget 1>/dev/null; then
 	sleep 3
 fi
 
+# these functions are used to find lib directories, used by other functions
+_find_libdir() {
+	find $LIB_PATHS -type d -regex "$@" -exec realpath {} ';' 2>/dev/null
+}
+_find_libdir_relative() {
+	find ./ ../ ../../ ../../../ ../../../../ -type d -regex "$@" 2>/dev/null
+}
+
 # checks target binary, creates appdir if needed and check systems dirs
 _check_dirs_and_target() {
 	if [ -n "$APPDIR" ]; then
@@ -146,13 +158,14 @@ _check_dirs_and_target() {
 	[ "$DEPLOY_ALL" = 1 ] && mkdir -p "$LIBDIR64"
 	# Look for a lib dir next to each instance of PATH
 	for libpath in $LIB_DIRS; do
-		for path in $(printf $PATH | tr ':' ' '); do
-			TRY_PATH="$(realpath "$path/../$libpath" 2>/dev/null)"
-			[ -d "$TRY_PATH" ] && LIB_PATHS="$LIB_PATHS $TRY_PATH"
+		for path in $(echo $PATH | tr ':' ' '); do
+			TRY_PATH="${path%/*}/$libpath"
+			if [ -d "$TRY_PATH" ] && [ ! -L "$TRY_PATH" ]; then
+				LIB_PATHS="$LIB_PATHS $TRY_PATH"
+			fi
 		done
 	done
-	TARGET_LIBS="$(patchelf --print-rpath $TARGET | tr ':' ' ')"
-	LIB_PATHS="$(printf "$LIB_PATHS" "$TARGET_LIBS" | tr ' ' '\n' | sort -u)"
+	LIB_PATHS="$(echo "$LIB_PATHS $LD_LIBRARY_PATH" | tr ' |:' '\n' | sort -u)"
 	cat <<-EOF
 	$LINE
 	Initial checks passed! deploying...
@@ -244,8 +257,7 @@ _get_deps() {
 _deploy_all_check() {
 	[ "$DEPLOY_ALL" != 1 ] && return 1
 	if [ -f "$LIBDIR"/libc.so* ]; then
-		GCONV="$(find $LIB_PATHS -type d \
-		  -regex '.*/gconv' -print -quit 2>/dev/null)"
+		GCONV="$(_find_libdir '.*/gconv' -print -quit)"
 		if [ -z "$GCONV" ]; then
 			echo "$LINE"
 			echo "ERROR: Could not find gconv modules needed by libc"
@@ -285,9 +297,19 @@ _deploy_qt() {
 		echo "ERROR: This application has no Qt dependency!"
 		return 1
 	fi
-	echo "$LINE"
-	QT_PLUGIN_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex '.*/plugins/platforms' -print -quit 2>/dev/null)"/../)"
+	# find the right Qt plugin dir
+	QT_PLUGIN_PATH="$(_find_libdir '.*/plugins/platforms')"
+	if [ "$QTVER" = "Qt6" ]; then
+		QT_PLUGIN_PATH="$(echo "$QT_PLUGIN_PATH" | grep -vi "Qt5" | head -1)"
+	elif [ "$QTVER" = "Qt5" ]; then
+		QT_PLUGIN_PATH="$(echo "$QT_PLUGIN_PATH" | grep -vi "Qt6" | head -1)"
+	fi
+	if [ ! -d "$QT_PLUGIN_PATH" ]; then
+		echo "ERROR: Could not find the path to the Qt plugins dir"
+		exit 1
+	fi
+	QT_PLUGIN_PATH="${QT_PLUGIN_PATH%/*}"
+
 	# copy qt plugins
 	for plugin in $QT_PLUGINS; do
 		mkdir -p "$PLUGIN_DIR"/"$plugin" || continue
@@ -337,10 +359,8 @@ _deploy_gtk() {
 	fi
 	echo "$LINE"
 	# find path to the gtk and gdk dirs (gdk needed by gtk)
-	GTK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex ".*/$GTKVER" -print -quit 2>/dev/null)")"
-	GDK_PATH="$(readlink -e "$(find $LIB_PATHS -type d \
-	  -regex ".*/gdk-pixbuf-.*" -print -quit 2>/dev/null)")"
+	GTK_PATH="$(_find_libdir ".*/$GTKVER" -print -quit)"
+	GDK_PATH="$(_find_libdir ".*/gdk-pixbuf-.*" -print -quit)"
 	if [ -z "$GTK_PATH" ] || [ -z "$GDK_PATH" ]; then
 		echo "ERROR: Could not find all GTK/gdk-pixbuf libs on system"
 		exit 1
@@ -365,7 +385,7 @@ _deploy_gtk() {
 _check_icon_and_desktop() {
 	cd "$APPDIR" || exit 1
 	# find and copy .desktop
-	NAME="$(echo "$TARGET" | awk -F"/" '{print $NF}')"
+	NAME="${TARGET##*/}"
 	if [ ! -f ./*.desktop ]; then
 		echo "$LINE"
 		echo "Trying to find .desktop for \"$TARGET\""...
@@ -442,42 +462,26 @@ _patch_libs_and_bin_rpath() {
 	# to point their rpaths to each other lib directory
 	LIBDIRS="$(find "$APPDIR" -type f -regex '.*/.*.so.*' 2>/dev/null \
 	  | sed 's/\/[^/]*$//' | sort -u)"
-	for libdir in $LIBDIRS; do
+	for libdir in $LIBDIRS $BINDIR; do
 		cd "$libdir" 2>/dev/null || continue
-		echo "Patching rpath of libraries in \"$libdir\"..."
+		echo "Patching rpath of files in \"$libdir\"..."
 		for dir in $RPATHS; do # TODO Find a better way to do this find lol
-			module="$(find ./ ../ ../../ ../../../ ../../../../ -maxdepth 5 \
-			  -type d -regex ".*$dir" -print -quit 2>/dev/null)"
-			check="$(realpath $module 2>/dev/null)"
-			case "$check" in # just in case find picks an absolute path
-				''|'/lib'|'/lib64'|'/usr/lib'|'/usr/lib64'|"$libdir"|\
-				'/usr/local/lib'|'/usr/local/lib64'|"$HOME/.local/lib")
-					continue
-					;;
-				*)
-					[ ! -d "$check" ] && continue
-					;;
-			esac
+			module="$(_find_libdir_relative ".*$dir" -print -quit)"
+			# this avoids adding a libdir outside the AppDir to rpath
+			if echo "$module" | grep -qi "${APPDIR##*/}"; then
+				continue
+			elif [ -z "$module" ]; then
+				continue
+			fi
+			# remove leading "./" and store path in a variable
 			module="${module#./}"
-			# store path in a variable
 			patch="$patch:\$ORIGIN/"$module""
 		done
-		find ./ -maxdepth 1 -type f -regex '.*\.so.*' ! -name 'ld-*.so.*' \
+		# patch the libs/binaries
+		find ./ -maxdepth 1 -type f ! -name 'ld-*.so.*' \
 		  -exec patchelf --set-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
 		patch=""
 	done
-	# add the rest of lib dirs to rpath of binaries
-	cd "$BINDIR" || exit 1
-	for dir in $RPATHS; do
-		module="$(find ../ ../../ -maxdepth 5 -type d \
-		  -regex ".*$dir" -print -quit 2>/dev/null)"
-		[ -z "$module" ] && continue
-		# store path in a variable
-		patch="$patch:\$ORIGIN/"$module""
-	done
-	find "$BINDIR"/* -maxdepth 1 -type f -exec \
-	  patchelf --add-rpath \$ORIGIN"$patch" {} ';' 2>/dev/null
-	patch=""
 	# likely overkill
 	cd "$LIBDIR" && find ./*/* -type f -regex '.*\.so.*' \
 	  ! -regex '.*/gconv.*' -exec ln -s {} "$LIBDIR" ';' 2>/dev/null
