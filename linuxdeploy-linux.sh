@@ -362,17 +362,20 @@ _deploy_qt() {
 	# where the Qt plugins will be placed
 	PLUGIN_DIR="$APPDIR"/usr/plugins
 	# find the right Qt plugin dir
-	QT_PLUGIN_PATH="$(_find_libdir '.*/plugins/platforms')"
-	if [ "$QTVER" = "Qt6" ]; then
-		QT_PLUGIN_PATH="$(echo "$QT_PLUGIN_PATH" | grep -vi "Qt5" | head -1)"
-	elif [ "$QTVER" = "Qt5" ]; then
-		QT_PLUGIN_PATH="$(echo "$QT_PLUGIN_PATH" | grep -vi "Qt6" | head -1)"
+	if [ -z "$QT_PLUGIN_PATH" ]; then
+		FOUND_QT="$(_find_libdir '.*/plugins/platforms')"
+		if [ "$QTVER" = "Qt6" ]; then
+			FOUND_QT="$(echo "$FOUND_QT" | grep -vi "Qt5" | head -1)"
+		elif [ "$QTVER" = "Qt5" ]; then
+			FOUND_QT="$(echo "$FOUND_QT" | grep -vi "Qt6" | head -1)"
+		fi
+		QT_PLUGIN_PATH="${FOUND_QT%/*}"
 	fi
 	if [ ! -d "$QT_PLUGIN_PATH" ]; then
 		echo "ERROR: Could not find the path to the Qt plugins dir"
 		exit 1
 	fi
-	QT_PLUGIN_PATH="${QT_PLUGIN_PATH%/*}"
+
 	# copy qt plugins
 	for plugin in $QT_PLUGINS; do
 		if [ -d "$QT_PLUGIN_PATH"/"$plugin" ]; then
@@ -403,10 +406,16 @@ _deploy_qt() {
 
 _deploy_gtk() {
 	# find path to the gtk and gdk dirs (gdk needed by gtk)
-	GTK_PATH="$(_find_libdir ".*/$GTKVER" -print -quit)"
-	GDK_PATH="$(_find_libdir ".*/gdk-pixbuf-.*" -print -quit)"
-	if [ -z "$GTK_PATH" ] || [ -z "$GDK_PATH" ]; then
-		echo "ERROR: Could not find all GTK/gdk-pixbuf libs on system"
+	if [ -z "$GTK_PATH" ]; then
+		GTK_PATH="$(_find_libdir ".*/$GTKVER" -print -quit)"
+	fi
+	if [ -z "$GDK_PIXBUF_MODULEDIR" ]; then
+		GDK_PATH="$(_find_libdir ".*/gdk-pixbuf-.*" -print -quit)"
+	else
+		GDK_PATH="$GDK_PIXBUF_MODULEDIR"
+	fi
+	if [ ! -d "$GTK_PATH" ] || [ ! -d "$GDK_PATH" ]; then
+		echo "ERROR: Could not find all GTK/gdk-pixbuf dirs on system"
 		exit 1
 	fi
 	# copy gtk libs
@@ -518,7 +527,7 @@ _patch_libs_and_bin_rpath() {
 				continue
 			elif [ "${module##*/}" = "${libdir##*/}" ]; then
 				continue
-			elif echo "$module" | grep -qi "${APPDIR##*/}"; then
+			elif ! realpath "$module" | grep -qi "$APPDIR"; then
 				continue
 			fi
 			# remove leading "./" and store path in a variable
