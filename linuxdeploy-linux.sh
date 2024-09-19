@@ -619,6 +619,6 @@ _check_apprun
 _patch_away_absolute_paths
 _patch_libs_and_bin_rpath
 _strip_and_check_not_found_libs
-if [ DEPLOY_ALL != 1 ]; then
+if [ "$DEPLOY_ALL" != 1 ]; then
 	_check_glibc_ver
 fi
