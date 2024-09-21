@@ -15,6 +15,7 @@
 # "$QT_PLUGINS" names of Qt plugins to deploy, defaults to several plugins
 
 [ "$DEBUG" = 1 ] && set -x
+
 # set vars
 NOT_FOUND=""
 BIN="$1"
@@ -105,10 +106,10 @@ fi
 # safety checks
 if [ -z "$1" ]; then
 	cat <<-EOF
-	"USAGE: $0 /path/to/binary"
-	"USAGE: $0 /path/to/binary /path/to/AppDir"
-	"USAGE: DEPLOY_QT=1 $0 /path/to/binary /path/to/AppDir"
-	"USAGE: SKIP=\"libA.so libB.so\" $0 /path/to/binary /path/to/AppDir"
+	USAGE: $0 /path/to/binary
+	USAGE: $0 /path/to/binary /path/to/AppDir
+	USAGE: SKIP="libA.so libB.so" $0 /path/to/binary /path/to/AppDir
+	USAGE: EXTRA_LIBS="libA.so libB.so" $0 /path/to/binary /path/to/AppDir
 	EOF
 	exit 1
 elif ! command -v find 1>/dev/null; then
@@ -387,8 +388,8 @@ _deploy_qt() {
 		fi
 	done
 	# Find any remaining libraries needed for Qt libraries
-	for file in $(find "$PLUGIN_DIR"/* -type f -regex '.*\.so.*'); do
-		[ -f "$file" ] && _deploy_libs "$file" "$LIBDIR"
+	find "$PLUGIN_DIR" -type f -regex '.*\.so.*' | while IFS= read -r LIB; do
+		_deploy_libs "$LIB" "$LIBDIR"
 	done
 	# make qt.conf file.
 	cat <<-EOF > "$BINDIR"/qt.conf
@@ -426,8 +427,8 @@ _deploy_gtk() {
 		exit 1
 	fi
 	# Find any remaining libraries needed for gtk libraries
-	for file in $(find "$LIBDIR"/*/* -type f -regex '.*\.so.*'); do
-		[ -f "$file" ] && _deploy_libs "$file" "$LIBDIR"
+	find "$LIBDIR"/*/* -type f -regex '.*\.so.*' | while IFS= read -r LIB; do
+		_deploy_libs "$LIB" "$LIBDIR"
 	done
 	# count gtk libs
 	extra_libs="$(find "$LIBDIR"/gtk*/* "$LIBDIR"/gdk*/* -type f \
