@@ -267,6 +267,10 @@ _deploy_libs() {
 	_check_if_qt_or_gtk
 	# continue deploying
 	for lib in $NEEDED_LIBS; do
+		# check if there is an absolute path to lib and remove it
+		if echo "$lib" | grep -q "^/"; then
+			patchelf --replace-needed "$lib" "$(basename "$lib")" "$1"
+		fi
 		# check lib is not in the exclude list or is not already deployed
 		if [ "$DEPLOY_ALL" != 1 ] && echo "$EXCLUDES" | grep -q "$lib"; then
 			if ! echo $skippedlib | grep -q "$lib"; then
