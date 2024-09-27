@@ -145,7 +145,7 @@ _find_libdir() {
 _find_libdir_relative() {
 	# TODO Find a better way to do this find lol
 	find ./ ../ ../../ ../../../ ../../../../ \
-	  maxdepth 5 -type d -regex "$@" 2>/dev/null
+	  -maxdepth 5 -type d -regex "$@" 2>/dev/null
 }
 
 # checks target binary, creates appdir if needed and check systems dirs
@@ -344,7 +344,7 @@ _deploy_all_check() {
 		cp -rnv "$GCONV"/*.so "$LIBDIR"/gconv
 		# count gconv libs
 		extra_libs="$(find "$LIBDIR"/gconv -type f \
-		-regex '.*\.so.*' 2>/dev/null | wc -l)"
+		  -regex '.*\.so.*' 2>/dev/null | wc -l)"
 		TOTAL_LIBS=$(( TOTAL_LIBS + extra_libs ))
 	elif [ -f "$LIBDIR"/libc.musl*.so* ]; then
 		LDMUSL="$(find $LIB_PATHS -type f \
