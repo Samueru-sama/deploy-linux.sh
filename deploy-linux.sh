@@ -473,7 +473,7 @@ _check_icon_and_desktop() {
 		find ./ -type f -regex ".*$ICON_NAME.*\.\(png\|svg\)" \
 		  -exec cp -n {} ./.DirIcon ';' 2>/dev/null
 		# now try to find it on the system
-		[ ! -f ./DirIcon ] && find /usr/share /usr/local -type f \
+		[ ! -f ./.DirIcon ] && find /usr/share /usr/local -type f \
 		  -regex ".*$ICON_NAME.*\.\(png\|svg\)" \
 		  -exec cp -n {} ./.DirIcon ';' 2>/dev/null
 		# make sure what we got is an image
