@@ -72,7 +72,7 @@ APPRUN="$(cat <<-'EOF'
 	fi
 	if [ -d "$GTK_HERE" ]; then
 	    export GTK_PATH="$GTK_HERE" \
-	      GTK_EXE_PREFIX="$HERE/usr"
+	      GTK_EXE_PREFIX="$HERE/usr" \
 	      GTK_DATA_PREFIX="$HERE/usr"
 	fi
 
