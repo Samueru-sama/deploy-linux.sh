@@ -17,11 +17,11 @@
 [ "$DEBUG" = 1 ] && set -x
 
 # set vars
-NOT_FOUND=""
 BIN="$1"
 APPDIR="$2"
 TOTAL_LIBS=0
 TARGET="$(realpath "$(command -v "$BIN" 2>/dev/null)" 2>/dev/null)"
+BIN_NAME="$(basename "$TARGET")"
 FORBIDDEN="https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/master/excludelist"
 LINE="----------------------------------------------------------------------"
 RPATHS="/lib /lib64 /gconv /bin"
@@ -162,7 +162,7 @@ _check_dirs_and_target() {
 		LIBDIR64="$APPDIR/usr/lib64"
 		mkdir -p "$BINDIR" "$LIBDIR" || exit 1
 		cp "$TARGET" "$BINDIR" || exit 1
-		TARGET="$(command -v "$BINDIR"/* 2>/dev/null)"
+		TARGET="$(command -v "$BINDIR/$BIN_NAME" 2>/dev/null)"
 		[ -z "$TARGET" ] && exit 1
 	else
 		BINDIR="$(dirname "$TARGET")"
@@ -192,6 +192,9 @@ _check_dirs_and_target() {
 	I will look for host libraries in: $LIB_PATHS
 	$LINE
 	EOF
+	# count how many libs are in the appdir before deploying
+	LIBSNUM_OLD="$(find "$APPDIR" -type f \
+	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
 }
 
 _check_options_and_get_denylist() {
@@ -265,8 +268,15 @@ _check_if_qt_or_gtk() {
 
 # main function, gets and copies the needed libraries
 _deploy_libs() {
-	NEEDED_LIBS=$(patchelf --print-needed "$1")
+	NEEDED_LIBS=$(patchelf --print-needed "$1" 2>/dev/null)
 	DESTDIR="$2"
+	# sanity check
+	if [ -z "$NEEDED_LIBS" ]; then
+		echo "$LINE"
+		echo "$1 has no dependencies or it is not an ELF"
+		echo "$LINE"
+		return 1
+	fi
 	# check if we need to deploy Qt or GTK
 	_check_if_qt_or_gtk
 	# continue deploying
@@ -296,7 +306,7 @@ _deploy_libs() {
 		  -print -quit 2>/dev/null)"
 		if [ -z "$foundlib" ]; then
 			echo "ERROR: Could not find \"$lib\""
-			NOT_FOUND="$NOT_FOUND:$lib"
+			echo "$lib" >> "$APPDIR"/NOT_FOUND_LIBS
 			continue
 		fi
 		# copy libs and their dependencies to the appdir
@@ -307,9 +317,9 @@ _deploy_libs() {
 		fi
 		# now find deps of found lib
 		_deploy_libs "$foundlib" "$DESTDIR"
-		TOTAL_LIBS=$(( TOTAL_LIBS + 1 ))
 	done
 }
+
 
 # adds extra libs and then runs _deploy_libs on them to get their dependencies
 # note that this extra libs can be located in $HOME and /opt
@@ -322,20 +332,18 @@ _deploy_extra_libs() {
 		  -print -quit 2>/dev/null)"
 		if [ -z "$foundlib" ]; then
 			echo "ERROR: could not find \"$lib\""
-			NOT_FOUND="$NOT_FOUND:$lib"
+			echo "$lib" >> "$APPDIR"/NOT_FOUND_LIBS
 			continue
 		fi
-		# get the deps of that lib and then copy it to the appdir
-		if _deploy_libs "$foundlib" "$LIBDIR"; then
-			if echo "$foundlib" | grep -qi "ld-.*.so"; then
-				cp -v "$foundlib" "$LIBDIR64" &
-			else
-				cp -v "$foundlib" "$LIBDIR" &
-			fi
-			TOTAL_LIBS=$(( TOTAL_LIBS + 1 ))
+		# copy lib to appdir
+		if echo "$foundlib" | grep -qi "ld-.*.so"; then
+			cp -v "$foundlib" "$LIBDIR64" &
+		else
+			cp -v "$foundlib" "$LIBDIR" &
 		fi
 	done
 }
+
 
 # adds gconv or ld-musl if needed
 _deploy_all_check() {
@@ -350,10 +358,6 @@ _deploy_all_check() {
 		fi
 		mkdir -p "$LIBDIR"/gconv || exit 1
 		cp -rnv "$GCONV"/*.so "$LIBDIR"/gconv
-		# count gconv libs
-		extra_libs="$(find "$LIBDIR"/gconv -type f \
-		  -regex '.*\.so.*' 2>/dev/null | wc -l)"
-		TOTAL_LIBS=$(( TOTAL_LIBS + extra_libs ))
 	elif [ -f "$LIBDIR"/libc.musl*.so* ]; then
 		LDMUSL="$(find $LIB_PATHS -type f \
 		  -regex '.*ld-musl.*' -print -quit 2>/dev/null)"
@@ -363,7 +367,7 @@ _deploy_all_check() {
 			echo "$LINE"
 			exit 1
 		fi
-		cp -rnv "$LDMUSL" "$LIBDIR64" && TOTAL_LIBS=$(( TOTAL_LIBS + 1 ))
+		cp -rnv "$LDMUSL" "$LIBDIR64"
 	fi
 }
 
@@ -392,7 +396,7 @@ _deploy_qt() {
 			cp -rnv "$QT_PLUGIN_PATH"/"$plugin" "$PLUGIN_DIR"
 		else
 			echo "ERROR: Could not find \"$plugin\" on system"
-			sleep 1
+			echo "$plugin" >> "$APPDIR"/NOT_FOUND_QT_PLUGINS
 		fi
 	done
 	# Find any remaining libraries needed for Qt libraries
@@ -407,10 +411,6 @@ _deploy_qt() {
 	Imports = qml
 	Qml2Imports = qml
 	EOF
-	# count Qt libs
-	extra_libs="$(find "$PLUGIN_DIR" -type f \
-	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
-	TOTAL_LIBS=$(( TOTAL_LIBS + extra_libs ))
 }
 
 _deploy_gtk() {
@@ -438,10 +438,6 @@ _deploy_gtk() {
 	find "$LIBDIR"/*/* -type f -regex '.*\.so.*' | while IFS= read -r LIB; do
 		_deploy_libs "$LIB" "$LIBDIR"
 	done
-	# count gtk libs
-	extra_libs="$(find "$LIBDIR"/gtk*/* "$LIBDIR"/gdk*/* -type f \
-	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
-	TOTAL_LIBS=$(( TOTAL_LIBS + extra_libs ))
 }
 
 _check_icon_and_desktop() {
@@ -567,16 +563,19 @@ _strip_and_check_not_found_libs() {
 		echo "$LINE"
 	fi
 	# output not found libs
-	if [ -n "$NOT_FOUND" ]; then
+	if [ -f "$APPDIR"/NOT_FOUND_LIBS ]; then
 		echo "$LINE"
 		echo "WARNING: Failed to find the following libraries:"
-		echo "$NOT_FOUND" | tr ':' '\n' | sort -u
+		sort -u "$APPDIR"/NOT_FOUND_LIBS
 		echo "$LINE"
 	fi
 	echo "$LINE"
 	echo "All Done!"
-	if [ "$TOTAL_LIBS" -gt 0 ]; then
-		echo "Deployed $TOTAL_LIBS libraries"
+	# count libs again and compare to determine if we deployed anything
+	LIBSNUM_NEW="$(find "$APPDIR" -type f \
+	  -regex '.*\.so.*' 2>/dev/null | wc -l)"
+	if [ "$LIBSNUM_OLD" != "$LIBSNUM_NEW" ]; then
+		echo "Deployed $(( LIBSNUM_NEW - LIBSNUM_OLD )) libraries"
 	else
 		echo "WARNING: No libraries have been deployed"
 		echo "Did you run $0 more than once?"
@@ -606,12 +605,19 @@ _check_glibc_ver() {
 # do the thing
 _check_dirs_and_target
 _check_options_and_get_denylist
-_deploy_libs "$TARGET" "$LIBDIR"
 if [ -n "$EXTRA_LIBS" ]; then
 	printf '\n%s\n%s\n\n' "$LINE" "Deploying extra libraries..."
 	_deploy_extra_libs
 	printf '\n%s\n%s\n\n' "Deployed extra libraries" "$LINE"
 fi
+# find the dependencies of any existing lib before deploying
+for LIB in $(find "$APPDIR" -type f -regex '.*\.so.*' 2>/dev/null); do
+	_deploy_libs "$LIB" "$LIBDIR"
+done
+# find the dependencies of all bins in BINDIR
+for BIN in $(find "$BINDIR" -type f 2>/dev/null); do
+	_deploy_libs "$BIN" "$LIBDIR"
+done
 _deploy_all_check
 if [ "$DEPLOY_QT" = 1 ]; then
 	printf '\n%s\n%s\n\n' "$LINE" "Deploying $QTVER..."
