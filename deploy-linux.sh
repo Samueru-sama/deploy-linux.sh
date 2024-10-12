@@ -113,7 +113,7 @@ if [ -z "$1" ]; then
 	USAGE: $0 /path/to/binary
 	USAGE: $0 /path/to/binary /path/to/AppDir
 	USAGE: SKIP="libA.so libB.so" $0 /path/to/binary /path/to/AppDir
-	USAGE: EXTRA_LIBS="libA.so libB.so" $0 /path/to/binary /path/to/AppDir
+	USAGE: EXTRA="libA.so libB.so randombin" $0 /path/to/binary /path/to/AppDir
 	EOF
 	exit 1
 elif ! command -v find 1>/dev/null; then
@@ -232,9 +232,9 @@ _check_options_and_get_denylist() {
 		echo 'Got it! Ignoring the following libraries:'
 		EXCLUDES="$(printf '%s\n%s' "$EXCLUDES" "$SKIP")"
 	fi
-	if [ -n "$EXTRA_LIBS" ]; then
+	if [ -n "$EXTRA" ]; then
 		echo "Got it! Will be also deploying:"
-		echo "$EXTRA_LIBS" | tr ' ' '\n'
+		echo "$EXTRA" | tr ' ' '\n'
 	fi
 	echo "$LINE"
 }
@@ -320,30 +320,33 @@ _deploy_libs() {
 	done
 }
 
-
-# adds extra libs and then runs _deploy_libs on them to get their dependencies
-# note that this extra libs can be located in $HOME and /opt
-_deploy_extra_libs() {
-	for lib in $EXTRA_LIBS; do
+# adds extra libs/bins and then runs _deploy_libs to get their dependencies
+# note this will search in $PATH, $LIB_PATHS and $HOME
+_deploy_extra_libs_bins() {
+	for thing in $EXTRA; do
 		# escape special character so that find doesn't error out
-		lib_to_find="$(echo $lib | sed 's|+|\\+|g')"
+		thing_to_find="$(echo $thing | sed 's|+|\\+|g')"
 		# find the path to the lib and check it exists
-		foundlib="$(find ./ $LIB_PATHS $HOME /opt -regex ".*$lib_to_find" \
-		  -print -quit 2>/dev/null)"
-		if [ -z "$foundlib" ]; then
-			echo "ERROR: could not find \"$lib\""
-			echo "$lib" >> "$APPDIR"/NOT_FOUND_LIBS
+		foundthing="$(find $LIB_PATHS "$HOME" $(echo "$PATH" | tr ':' ' ') \
+		  -type f -regex ".*$thing_to_find" -exec file {} ';' 2>/dev/null \
+		  | awk -F":" '/ELF/ {print $1; exit}')"
+		if [ -z "$foundthing" ]; then
+			echo "ERROR: could not find extra \"$thing\""
+			sleep 1
+			echo "$thing (EXTRA)" >> "$APPDIR"/NOT_FOUND_LIBS
 			continue
 		fi
-		# copy lib to appdir
-		if echo "$foundlib" | grep -qi "ld-.*.so"; then
-			cp -v "$foundlib" "$LIBDIR64" &
+		# copy to appdir
+		if echo "$foundthing" | grep -qi "ld-.*.so"; then
+			cp -v "$foundthing" "$LIBDIR64" &
+		elif echo "$foundthing" | grep -qi ".*.so"; then
+			cp -v "$foundthing""$LIBDIR" &
 		else
-			cp -v "$foundlib" "$LIBDIR" &
+			cp -v "$foundthing" "$BINDIR" &
 		fi
+		echo "Found and copied $foundthing"
 	done
 }
-
 
 # adds gconv or ld-musl if needed
 _deploy_all_check() {
@@ -605,35 +608,42 @@ _check_glibc_ver() {
 # do the thing
 _check_dirs_and_target
 _check_options_and_get_denylist
-if [ -n "$EXTRA_LIBS" ]; then
-	printf '\n%s\n%s\n\n' "$LINE" "Deploying extra libraries..."
-	_deploy_extra_libs
-	printf '\n%s\n%s\n\n' "Deployed extra libraries" "$LINE"
+
+if [ -n "$EXTRA" ]; then
+	printf '\n%s\n%s\n\n' "$LINE" "Deploying extra files..."
+	_deploy_extra_libs_bins
+	printf '\n%s\n%s\n\n' "Deployed extra files" "$LINE"
 fi
+
 # find the dependencies of any existing lib before deploying
 for LIB in $(find "$APPDIR" -type f -regex '.*\.so.*' 2>/dev/null); do
 	_deploy_libs "$LIB" "$LIBDIR"
 done
+
 # find the dependencies of all bins in BINDIR
 for BIN in $(find "$BINDIR" -type f 2>/dev/null); do
 	_deploy_libs "$BIN" "$LIBDIR"
 done
+
 _deploy_all_check
 if [ "$DEPLOY_QT" = 1 ]; then
 	printf '\n%s\n%s\n\n' "$LINE" "Deploying $QTVER..."
 	_deploy_qt
 	printf '\n%s\n%s\n\n' "Deployed $QTVER" "$LINE"
 fi
+
 if [ "$DEPLOY_GTK" = 1 ]; then
 	printf '\n%s\n%s\n\n' "$LINE" "Deploying $GTKVER..."
 	_deploy_gtk
 	printf '\n%s\n%s\n\n' "Deployed $GTKVER" "$LINE"
 fi
+
 _check_icon_and_desktop
 _check_apprun
 _patch_away_absolute_paths
 _patch_libs_and_bin_rpath
 _strip_and_check_not_found_libs
+
 if [ "$DEPLOY_ALL" != 1 ]; then
 	_check_glibc_ver
 fi
