@@ -12,7 +12,7 @@ USAGE EXAMPLES:
 
 `SKIP="libA.so libB.so" ./deploy-linux.sh /path/to/binary /path/to/AppDir` Ignores given libraries from being deployed.
 
-`EXTRA_LIBS="libA.so libB.so" ./deploy-linux.sh /path/to/binary /path/to/AppDir` Deploys extra libraries.
+`USAGE: EXTRA="libA.so libB.so randombin" $0 /path/to/binary /path/to/AppDir` Deploys extra libraries and/or binaries.
 
 `DEPLOY_AL=1 ./deploy-linux.sh /path/to/binary /path/to/AppDir` Will ignore the [excludelist](https://github.com/AppImageCommunity/pkg2appimage/blob/master/excludelist) and deploy ALL libraries.
 
